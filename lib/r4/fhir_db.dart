@@ -264,6 +264,24 @@ class FhirDb {
     return allResources;
   }
 
+  Future<Iterable<Map<dynamic, dynamic>>> getAllHistory(
+      [HiveCipher? cipher]) async {
+    final List<Map<dynamic, dynamic>> allRecords = <Map<dynamic, dynamic>>[];
+    try {
+      await _ensureInit(cipher: cipher);
+      Box<Map<dynamic, dynamic>> box;
+      if (!Hive.isBoxOpen('history')) {
+        box = await Hive.openBox('history', encryptionCipher: cipher);
+      } else {
+        box = Hive.box('history');
+      }
+      allRecords.addAll(box.values);
+    } catch (e, s) {
+      log('Error: $e, Stack at time of Error: $s');
+    }
+    return allRecords;
+  }
+
   Future<bool> deleteById({
     required R4ResourceType resourceType,
     required String id,
@@ -349,7 +367,7 @@ class FhirDb {
     final Map<dynamic, Map<dynamic, dynamic>> boxData = box.toMap();
     boxData.removeWhere((dynamic key, Map<dynamic, dynamic> value) =>
         !finder(Map<String, dynamic>.from(value)));
-    return box.values
+    return boxData.values
         .map((Map<dynamic, dynamic> e) =>
             jsonDecode(jsonEncode(e)) as Map<String, dynamic>)
         .toList();
@@ -461,7 +479,7 @@ class FhirDb {
   /// Specify a list of which boxes you want to close
   Future<void> closeResourceBoxes(
     List<R4ResourceType> types, [
-    HiveCipher? cipher,
+    HiveCipher? cipher,_
   ]) async {
     await _ensureInit(cipher: cipher);
     for (final R4ResourceType resourceType in types) {

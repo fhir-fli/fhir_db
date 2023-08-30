@@ -272,6 +272,11 @@ class FhirDbDao {
           .map((Map<String, dynamic> e) => Resource.fromJson(e))
           .toList();
 
+  Future<List<Map<dynamic, dynamic>>> getAllHistory({HiveCipher? cipher,
+    String? pw,}) async =>
+      (await _fhirDb.getAllHistory(cipher ?? cipherFromKey(key: pw)))
+          .toList();
+
   /// Delete specific resource
   Future<bool> delete({
     Resource? resource,
