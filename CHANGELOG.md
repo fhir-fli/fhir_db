@@ -1,5 +1,13 @@
 # fhir_db
 
+## [0.11.0-3]
+
+* Trying to score more pub points
+
+## [0.11.0-2]
+
+* Updated dependencies
+
 ## [0.11.0-1]
 
 * Major changes, including breaking changes
