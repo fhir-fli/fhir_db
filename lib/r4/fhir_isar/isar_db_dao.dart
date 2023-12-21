@@ -4,26 +4,26 @@ import 'package:fhir/r4.dart';
 
 import 'isar_db.dart';
 
-class FhirDbDao {
+class IsarDbDao {
   /// Singleton factory
-  factory FhirDbDao() => _fhirFhirDbDao;
+  factory IsarDbDao() => _fhirIsarDbDao;
 
   /// Private Constructor
-  FhirDbDao._() {
-    _fhirDb = FhirDb();
+  IsarDbDao._() {
+    _fhirDb = IsarDb();
   }
 
   /// Singleton Accessor
-  FhirDb get fhirDb => _fhirDb;
+  IsarDb get fhirDb => _fhirDb;
 
   /// The actual database
-  late FhirDb _fhirDb;
+  late IsarDb _fhirDb;
 
   /// Singleton Instance
-  static final FhirDbDao _fhirFhirDbDao = FhirDbDao._();
+  static final IsarDbDao _fhirIsarDbDao = IsarDbDao._();
 
   /// Initalizes the database, configure its path, and return it
-  FhirDb init(String? path, {String? pw}) {
+  IsarDb init(String? path, {String? pw}) {
     _fhirDb.initDb(path: path, encryptionKey: pw);
     return _fhirDb;
   }

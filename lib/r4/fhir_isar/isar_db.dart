@@ -9,7 +9,7 @@ import 'package:isar/isar.dart';
 
 import 'fhir_isar.dart';
 
-class FhirDb {
+class IsarDb {
   Isar? _isar;
 
   Future<void> updateCipher(

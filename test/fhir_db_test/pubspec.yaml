@@ -1,0 +1,30 @@
+name: fhir_db_test
+description: A new Flutter project.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.1.2 <4.0.0"
+
+dependencies:
+  collection: ^1.18.0
+  cupertino_icons: ^1.0.6
+  flutter:
+    sdk: flutter
+  fhir: ^0.11.4
+  fhir_bulk: ^0.11.5
+  fhir_db:
+    path: ../../../fhir_db
+  isar_flutter_libs: ^4.0.0-dev.14
+  test: ^1.24.7
+
+dev_dependencies:
+  flutter_lints: ^2.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/
+
+dependency_overrides:
+  collection: ^1.18.0
