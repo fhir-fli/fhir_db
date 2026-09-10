@@ -62,6 +62,16 @@ abstract class FhirModel<R extends FhirNode, T extends Object> {
 
   /// As [enumSystem], for the enum's display.
   String? enumDisplay(FhirNode value) => null;
+
+  /// Whether `:below` on a mime-type token accepts the first segment alone.
+  /// R4B search.html 3.1.1.4.10.1 (read whole 2026-09-09) gives only
+  /// `contenttype:below=text/xml`; R5 search.html 3.2.1.6.4 (read whole
+  /// 2026-09-09) adds, quoted verbatim: "Additionally, the below modifier
+  /// can be applied to the first segment only:
+  /// `contenttype:below=image` will match all image/ content types". The
+  /// one place the three DAOs differed in behaviour before they became
+  /// this package.
+  bool get mimeTypeBelowMatchesFirstSegment => false;
 }
 
 /// Reads over any [FhirNode] the store makes everywhere.

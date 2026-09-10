@@ -2258,10 +2258,15 @@ class FhirDao<R extends FhirNode, T extends Object>
             // element is bound to the mimetypes value set. On any other
             // token `:below` is subsumption (3.1.1.4.10), which needs the
             // CodeSystem's hierarchy and is refused rather than answered
-            // as a plain match. A value with no `/` is not a base part
-            // either; R4B describes no other form.
+            // as a plain match. A value with no `/` is the first segment
+            // alone: R4B search.html 3.1.1.4.10.1 (read whole 2026-09-09)
+            // describes only the `type/subtype` form, R5 3.2.1.6.4 adds the
+            // first segment; the model says which
+            // ([FhirModel.mimeTypeBelowMatchesFirstSegment]).
             final mime = unescapeValue(value);
-            if (!declared.mime || !mime.contains('/')) {
+            final firstSegment = !mime.contains('/');
+            if (!declared.mime ||
+                (firstSegment && !model.mimeTypeBelowMatchesFirstSegment)) {
               throw UnsupportedSearchModifier(
                 parameter: name,
                 modifier: modifier,
@@ -2269,15 +2274,13 @@ class FhirDao<R extends FhirNode, T extends Object>
                 allowed: modifiersByType['token'] ?? const {},
               );
             }
-            final withParameters = '$mime;';
+            final prefix = firstSegment ? '$mime/' : '$mime;';
             return _IndexCondition(
               t,
               t.id,
               path &
                   (t.tokenValue.equals(mime) |
-                      t.tokenValue
-                          .substr(1, withParameters.length)
-                          .equals(withParameters)),
+                      t.tokenValue.substr(1, prefix.length).equals(prefix)),
             );
           case 'in':
           case 'not-in':
