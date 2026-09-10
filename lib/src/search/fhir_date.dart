@@ -34,8 +34,8 @@ enum DatePrecision {
 }
 
 /// A parsed FHIR date-like value.
-class FhirDate {
-  const FhirDate._(this.written, this.low, this.precision);
+class FhirDateValue {
+  const FhirDateValue._(this.written, this.low, this.precision);
 
   /// Parses [written], or returns null when it is not a FHIR date, dateTime
   /// or instant.
@@ -46,7 +46,7 @@ class FhirDate {
   /// asks: "Where both search parameters and resource element date times
   /// do not have time zones, the servers local time zone should be
   /// assumed".
-  static FhirDate? tryParse(String written) {
+  static FhirDateValue? tryParse(String written) {
     final m = _fhirDate.firstMatch(written.trim());
     if (m == null) return null;
     final year = int.parse(m.group(1)!);
@@ -108,7 +108,7 @@ class FhirDate {
         millis,
       );
     }
-    return FhirDate._(written, low, precision);
+    return FhirDateValue._(written, low, precision);
   }
 
   /// The value as written.
@@ -142,7 +142,7 @@ class FhirDate {
 /// The half-open range `[low, high)` a date-like value covers, per R4B
 /// search §3.1.1.4.7, or null when [written] is not a FHIR date.
 ({DateTime low, DateTime high})? dateTimeRange(String written) {
-  final parsed = FhirDate.tryParse(written);
+  final parsed = FhirDateValue.tryParse(written);
   if (parsed == null) return null;
   return (low: parsed.low, high: parsed.high);
 }
