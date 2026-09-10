@@ -1844,12 +1844,15 @@ class FhirDao<R extends FhirNode, T extends Object>
     // 3.1.1.4.4, a SHALL: a modifier the type does not allow, or one this
     // package does not implement, is refused rather than answered wrongly.
     final modifier = key.modifier;
-    if (modifier != null && !isModifierAllowed(declared.type, modifier)) {
+    if (modifier != null &&
+        !model.modifierRules.isAllowed(declared.type, modifier)) {
       throw UnsupportedSearchModifier(
         parameter: key.name,
         modifier: modifier,
         type: declared.type,
-        allowed: modifiersByType[declared.type] ?? const <String>{},
+        allowed: model.modifierRules.allowedFor(declared.type),
+        definedButUnsupported:
+            model.modifierRules.isUnsupported(declared.type, modifier),
       );
     }
     try {
@@ -2271,7 +2274,7 @@ class FhirDao<R extends FhirNode, T extends Object>
                 parameter: name,
                 modifier: modifier,
                 type: 'token',
-                allowed: modifiersByType['token'] ?? const {},
+                allowed: model.modifierRules.allowedFor('token'),
               );
             }
             final prefix = firstSegment ? '$mime/' : '$mime;';
@@ -2353,7 +2356,7 @@ class FhirDao<R extends FhirNode, T extends Object>
                 parameter: name,
                 modifier: modifier,
                 type: 'reference',
-                allowed: modifiersByType['reference'] ?? const {},
+                allowed: model.modifierRules.allowedFor('reference'),
               );
             }
             final prefix = canonical.contains('|') ? canonical : '$canonical|';
@@ -3689,12 +3692,14 @@ class FhirDao<R extends FhirNode, T extends Object>
     // has no definition for cannot have its modifier validated, and refusing
     // it on that basis would reject searches a deployment does support.
     if (declared != null && modifier != null) {
-      if (!isModifierAllowed(declared.type, modifier)) {
+      if (!model.modifierRules.isAllowed(declared.type, modifier)) {
         throw UnsupportedSearchModifier(
           parameter: key.name,
           modifier: modifier,
           type: declared.type,
-          allowed: modifiersByType[declared.type] ?? const <String>{},
+          allowed: model.modifierRules.allowedFor(declared.type),
+          definedButUnsupported:
+              model.modifierRules.isUnsupported(declared.type, modifier),
         );
       }
     }

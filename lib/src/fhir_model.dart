@@ -1,4 +1,5 @@
 import 'package:fhir_db/src/search/search_parameter_types.dart';
+import 'package:fhir_db/src/search/search_query_key.dart';
 import 'package:fhir_node/fhir_node.dart';
 
 /// What the store needs from a FHIR version, supplied by a binding
@@ -72,6 +73,11 @@ abstract class FhirModel<R extends FhirNode, T extends Object> {
   /// one place the three DAOs differed in behaviour before they became
   /// this package.
   bool get mimeTypeBelowMatchesFirstSegment => false;
+
+  /// Which modifiers each search parameter type takes in this version, and
+  /// which of those the store does not implement. R4B's tables unless the
+  /// binding says otherwise; see [ModifierRules].
+  ModifierRules get modifierRules => r4bModifierRules;
 }
 
 /// Reads over any [FhirNode] the store makes everywhere.

@@ -84,6 +84,7 @@ class UnsupportedSearchModifier implements Exception {
     required this.modifier,
     required this.type,
     required this.allowed,
+    this.definedButUnsupported = false,
   });
 
   /// The search parameter as the client wrote it, without the modifier.
@@ -98,9 +99,14 @@ class UnsupportedSearchModifier implements Exception {
   /// What that type does allow, for the error message.
   final Set<String> allowed;
 
+  /// True when the version's search page defines the modifier for the type
+  /// and this store does not implement it ([ModifierRules.unsupported]),
+  /// as opposed to a modifier the type never takes.
+  final bool definedButUnsupported;
+
   /// A message naming what was asked for and what the type permits.
   String get message {
-    if (unsupportedModifiersByType[type]?.contains(modifier) ?? false) {
+    if (definedButUnsupported) {
       return 'The modifier ":$modifier" is defined for $type search '
           'parameters but this server does not support it on "$parameter".';
     }
@@ -187,7 +193,56 @@ class AmbiguousReference implements Exception {
   String toString() => 'AmbiguousReference: $message';
 }
 
-/// The modifiers R4 allows, per search parameter type.
+/// Which modifiers a search parameter type takes, and which of those this
+/// store does not implement, for one FHIR version. The tables come from
+/// each version's search.html and differ between R4B, R5 and R6 (R5 adds
+/// `code-text` and `text-advanced`, gives `contains` to uri, `not-in` and
+/// `text` to reference, and makes `:below` on a reference a version
+/// comparison this store cannot make); a binding's model supplies its own
+/// ([FhirModel.modifierRules]). R4B's are [r4bModifierRules].
+class ModifierRules {
+  /// Creates the rules from the two tables.
+  const ModifierRules({required this.allowed, required this.unsupported});
+
+  /// Parameter type → the modifiers the version's search page gives it.
+  final Map<String, Set<String>> allowed;
+
+  /// Parameter type → the modifiers the page gives it that this store does
+  /// not implement; refused with a message that says so.
+  final Map<String, Set<String>> unsupported;
+
+  /// Whether [modifier] is allowed on a parameter of [type].
+  ///
+  /// A reference accepts any resource type as a modifier,
+  /// `subject:Patient`, so anything shaped like a type name is allowed
+  /// through for references and validated against the parameter's declared
+  /// targets later, where the target list is known.
+  bool isAllowed(String type, String modifier) {
+    if (type == 'reference' &&
+        modifier.isNotEmpty &&
+        modifier[0].toUpperCase() == modifier[0] &&
+        RegExp(r'^[A-Z][A-Za-z]+$').hasMatch(modifier)) {
+      return true;
+    }
+    return allowed[type]?.contains(modifier) ?? false;
+  }
+
+  /// Whether the page defines [modifier] for [type] and the store does not
+  /// implement it.
+  bool isUnsupported(String type, String modifier) =>
+      unsupported[type]?.contains(modifier) ?? false;
+
+  /// The modifiers allowed on [type], for an error message.
+  Set<String> allowedFor(String type) => allowed[type] ?? const <String>{};
+}
+
+/// R4B's modifier rules: [modifiersByType] and [unsupportedModifiersByType].
+const r4bModifierRules = ModifierRules(
+  allowed: modifiersByType,
+  unsupported: unsupportedModifiersByType,
+);
+
+/// The modifiers R4B allows, per search parameter type.
 ///
 /// This is NOT generated, and it cannot be: R4 core populates
 /// `SearchParameter.modifier` on none of its 1,414 definitions, so the allowed
@@ -236,15 +291,8 @@ const unsupportedModifiersByType = <String, Set<String>>{
 /// so anything starting with an upper case letter is allowed through for
 /// references and validated against the parameter's declared targets later,
 /// where the target list is known.
-bool isModifierAllowed(String type, String modifier) {
-  if (type == 'reference' &&
-      modifier.isNotEmpty &&
-      modifier[0].toUpperCase() == modifier[0] &&
-      RegExp(r'^[A-Z][A-Za-z]+$').hasMatch(modifier)) {
-    return true;
-  }
-  return modifiersByType[type]?.contains(modifier) ?? false;
-}
+bool isModifierAllowed(String type, String modifier) =>
+    r4bModifierRules.isAllowed(type, modifier);
 
 /// The comparator on the front of [value], or null.
 ///
