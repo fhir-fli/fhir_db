@@ -1,5 +1,27 @@
 # fhir_db
 
+## [0.13.0]
+
+The package is reborn as the model-independent core of the fhir-fli SQLite
+store. Until 0.12.0 it was a Sembast/Hive wrapper over the pre-`fhir_r4`
+`fhir` package; that API is gone. What replaces it is the store that lived
+in `fhir_r4_db`, `fhir_r5_db` and `fhir_r6_db` as three hand-kept copies
+(75 of 4,406 DAO lines differed between r4 and r5, all version names):
+
+- **One store over `FhirNode`.** Resources, versions and history (schema 14:
+  the current version stored once, history holding what a save replaced and
+  the tombstones), the nine search-parameter index tables, compartments,
+  `_has`, `_include` targets, ValueSet expansion for `:in`/`:below`, the
+  SQLCipher key derivation. The FHIR version enters through
+  `FhirModel<R extends FhirNode>`: the resource type of a value, JSON in and
+  out, meta stamping, and the three generated per-version artefacts (search
+  parameter definitions, the index extractor, the compartment definitions).
+- **Bindings.** `fhir_r4_db`, `fhir_r5_db` and `fhir_r6_db` re-export this
+  package and add the generated data, a `FhirModel` for their version and
+  the typed API they always had; an application imports the binding only.
+- Schema and behaviour are those of `fhir_r4_db` 0.12.0 + its unreleased
+  changes (schema 13 and 14); an existing database opens unchanged.
+
 ## [0.12.0]
  
 * Updated dependencies

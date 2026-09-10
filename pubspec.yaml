@@ -1,24 +1,52 @@
 name: fhir_db
-description: A wrapper for Sembast and SQFlite to enable easy, local and secure storage of fhir resources
-version: 0.12.0
+description: >-
+  Model-independent FHIR store on SQLite (Drift): resources, versions and
+  history, a search-parameter index for every FHIR search type, compartments,
+  encryption. FHIR-free — the model enters through FhirModel over FhirNode;
+  bindings are fhir_r4/r5/r6_db.
+version: 0.13.0
 homepage: https://www.fhirfli.dev/
 repository: https://github.com/fhir-fli/fhir_db
+issue_tracker: https://github.com/fhir-fli/fhir_db/issues
+
+topics:
+  - fhir
+  - hl7
+  - healthcare
+  - database
+  - sqlite
+
+platforms:
+  android:
+  ios:
+  linux:
+  macos:
+  web:
+  windows:
 
 environment:
-  sdk: ">=3.0.0 <4.0.0"
+  sdk: ^3.5.0
 
+# Model-independent core: NO fhir_r* dependency. The FHIR version enters at
+# runtime through FhirModel<R extends FhirNode>, implemented by the separate
+# fhir_r4_db / fhir_r5_db / fhir_r6_db binding packages, which also carry
+# the generated per-version data (search parameter definitions, the index
+# extractor, the compartment definitions).
 dependencies:
-  collection: ^1.18.0
-  fhir: ^0.12.0
-  # fhir:
-  #   path: ../fhir
-  fhir_bulk: ^0.12.0
-  # fhir_bulk:
-  #   path: ../fhir_bulk
-  hive: ^2.2.3
-  path: ^1.9.0
+  collection: ^1.19.1
+  crypto: ^3.0.7
+  drift: ^2.33.0
+  fhir_node: ^0.6.0
+  meta: ^1.16.0
+  sqlite3: ^3.1.5
 
 dev_dependencies:
-  import_sorter: ^4.6.0
-  lints: ^3.0.0
-  test: ^1.25.2
+  build_runner: ^2.4.0
+  drift_dev: ^2.33.0
+  test: ^1.29.0
+  very_good_analysis: ^10.0.0
+
+hooks:
+  user_defines:
+    sqlite3:
+      source: sqlite3mc
