@@ -355,6 +355,18 @@ class SearchIndexer {
           searchName: searchName,
         );
       default:
+        // A resource nested in the indexed one (Bundle.entry[0].resource,
+        // the `composition` and `message` parameters): the reference to it.
+        // R6 build.fhir.org/search.html 3.2.1.5.12 (read whole 2026-09-13):
+        // the reference type "is also be used to search resource elements of
+        // type Resource - i.e., where one resource is directly nested within
+        // another".
+        if (value.isResource) {
+          final nestedId = value.resourceId;
+          return nestedId == null
+              ? const []
+              : [row('${value.fhirType}/$nestedId')];
+        }
         if (!uriTypes.contains(value.fhirType)) return const [];
         final written = value.primitiveValue;
         return written == null ? const [] : [row(written)];

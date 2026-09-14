@@ -230,6 +230,21 @@ void main() {
       expect(rows.single.referenceValue.present, isFalse);
     });
 
+    test('a nested resource is the reference to it (Bundle composition)', () {
+      final rows = indexer.referenceRows(
+        JsonNode.resource({'resourceType': 'Composition', 'id': 'c1'}),
+        'Bundle',
+        'b1',
+        0,
+        'Bundle.entry[0].resource',
+        0,
+        searchName: 'composition',
+      );
+      expect(rows.single.referenceValue.value, 'Composition/c1');
+      expect(rows.single.referenceResourceType.value, 'Composition');
+      expect(rows.single.referenceIdPart.value, 'c1');
+    });
+
     test('a display-only reference gives no row; a canonical gives one', () {
       expect(
         indexer.referenceRows(
