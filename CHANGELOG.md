@@ -1,5 +1,33 @@
 # fhir_db
 
+## [0.14.0]
+
+- **Uploaded `SearchParameter` resources are indexed.** A stored
+  `SearchParameter` with `status: active` is evaluated with the FHIRPath
+  engine on every save of a resource its `base` covers, and its rows go to
+  the table its `type` names, through the same row builders the generated
+  extractor uses (`CustomSearchParameters`, loaded from the store on first
+  use, reloaded when a SearchParameter is saved or deleted). The query side
+  routes an uploaded code the same way (`FhirDao.lookupDefinition`).
+  `rebuildSearchIndex()` indexes existing resources by it: the reindex.
+  What HAPI/Smile CDR and the Azure FHIR service do for every parameter;
+  the specification's own set keeps the generated extractor (measured 1.4
+  to 6 times faster on the MIMIC sample).
+- A definition the store cannot index by is refused at save with
+  `InvalidSearchParameter`: no code, base or expression; a type other than
+  string/token/reference/date/quantity/number/uri/special; a base that is
+  not a resource type of the version; a code the specification already
+  defines on that base; an expression that does not parse. An inactive
+  definition is stored and indexes nothing.
+- `resolve()` while indexing answers a resource of the referenced type
+  from the reference string alone (`IndexHostServices`), so
+  `subject.where(resolve() is Patient)` holds for `Patient/123` whether or
+  not that Patient is stored, as the generated extractor's string test does.
+  Needs `fhir_path` 0.14.2.
+- `FhirModel.createFhirPathEngine(hostServices)`: a binding supplies its
+  engine; a model returning null (the default) stores SearchParameters and
+  indexes nothing by them.
+
 ## [0.13.0]
 
 The package is reborn as the model-independent core of the fhir-fli SQLite

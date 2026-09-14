@@ -9,6 +9,7 @@ import 'package:fhir_db/src/has_parameter.dart';
 import 'package:fhir_db/src/new_id.dart';
 import 'package:fhir_db/src/search/compartment_scope.dart';
 import 'package:fhir_db/src/search/contained_index.dart';
+import 'package:fhir_db/src/search/custom_search_parameters.dart';
 import 'package:fhir_db/src/search/implicit_range.dart';
 import 'package:fhir_db/src/search/normalize.dart';
 import 'package:fhir_db/src/search/search_date_range.dart';
@@ -102,6 +103,40 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// Set to true to store versionId as a timestamp instead of an integer.
   bool versionIdAsTime = false;
 
+  /// Loads the uploaded search parameters before anything that indexes or
+  /// searches, so the synchronous lookups below see them.
+  Future<void> _ready() => attachedDatabase.customSearchParameters;
+
+  /// The definition of [code] on [resourceType]: the specification's, else
+  /// an uploaded one, else null.
+  SearchParameterDefinition? lookupDefinition(
+    String resourceType,
+    String code,
+  ) =>
+      model.searchParameters.lookup(resourceType, code) ??
+      attachedDatabase.customSearchParametersIfLoaded
+          ?.lookup(resourceType, code);
+
+  /// The uploaded parameters' rows for [resource], appended to [lists].
+  Future<void> _appendCustomRows(R resource, SearchParameterLists lists) async {
+    final custom = attachedDatabase.customSearchParametersIfLoaded;
+    if (custom != null) await custom.appendRows(resource, lists);
+  }
+
+  /// A `SearchParameter` is checked before it is stored: what the store
+  /// could not index by is refused ([InvalidSearchParameter]) rather than
+  /// kept as a definition that finds nothing.
+  void _validateIfSearchParameter(R resource) {
+    if (resource.fhirType != 'SearchParameter') return;
+    attachedDatabase.customSearchParametersIfLoaded?.parse(resource);
+  }
+
+  Future<void> _reloadIfSearchParameter(String resourceType) async {
+    if (resourceType == 'SearchParameter') {
+      await attachedDatabase.reloadCustomSearchParameters();
+    }
+  }
+
   /// Forces the shape of a one-key sorted search: true the index walk,
   /// false the grouped join, null (production) whichever the filter's size
   /// calls for. Both shapes must give the same order; the sort tests run
@@ -183,6 +218,8 @@ class FhirDao<R extends FhirNode, T extends Object>
   }) async {
     final withId = _withIdIfNone(resource);
     final id = withId.resourceId!;
+    await _ready();
+    _validateIfSearchParameter(withId);
 
     final newResource = await transaction(() async {
       final existingRow =
@@ -218,6 +255,7 @@ class FhirDao<R extends FhirNode, T extends Object>
     if (storeForSync) {
       await _saveToSync(newResource);
     }
+    await _reloadIfSearchParameter(newResource.fhirType);
 
     return newResource;
   }
@@ -245,6 +283,8 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// first version is copied.
   Future<bool> saveResources(List<R> resourcesList) async {
     if (resourcesList.isEmpty) return true;
+    await _ready();
+    resourcesList.forEach(_validateIfSearchParameter);
     try {
       final newResources = <R>[];
       await transaction(() async {
@@ -301,6 +341,9 @@ class FhirDao<R extends FhirNode, T extends Object>
       // has happened, so on the many batches of one load almost every call
       // is a no-op. See FhirDb.ensurePlannerStatistics.
       await customStatement('PRAGMA optimize=0x10002');
+      if (resourcesList.any((r) => r.fhirType == 'SearchParameter')) {
+        await _reloadIfSearchParameter('SearchParameter');
+      }
 
       return true;
     } catch (e) {
@@ -530,7 +573,8 @@ class FhirDao<R extends FhirNode, T extends Object>
     String? ifMatchVersion,
   }) async {
     final resourceTypeString = resourceType.toString();
-    return transaction(() async {
+    await _ready();
+    final deleted = await transaction(() async {
       final existing = await _currentRow(resourceType, id);
       final currentVersion = existing?.versionId;
       if (ifMatchVersion != null && currentVersion != ifMatchVersion) {
@@ -582,6 +626,8 @@ class FhirDao<R extends FhirNode, T extends Object>
       await batch((b) => _deleteSearchParams(b, resourceTypeString, id));
       return count > 0;
     });
+    if (deleted) await _reloadIfSearchParameter(resourceTypeString);
+    return deleted;
   }
 
   /// Retrieve all resources of a given type.
@@ -878,6 +924,7 @@ class FhirDao<R extends FhirNode, T extends Object>
     CompartmentScope? compartment,
     Set<String>? ids,
   }) async {
+    await _ready();
     final resourceTypeString = resourceType.toString();
 
     final paged = await _pagedIds(
@@ -1023,7 +1070,7 @@ class FhirDao<R extends FhirNode, T extends Object>
       // this build has no definition for was ever indexed, so there is
       // nothing to search either way. This used to fall through to a path
       // that guessed the type from the value's shape and returned nothing.
-      if (model.searchParameters.lookup(resourceType, key.name) == null) {
+      if (lookupDefinition(resourceType, key.name) == null) {
         continue;
       }
 
@@ -1693,7 +1740,7 @@ class FhirDao<R extends FhirNode, T extends Object>
       );
     }
 
-    final declared = model.searchParameters.lookup(resourceType, name);
+    final declared = lookupDefinition(resourceType, name);
     if (declared == null) return null;
 
     Expression<bool> named(
@@ -1839,7 +1886,7 @@ class FhirDao<R extends FhirNode, T extends Object>
   }) async {
     // `_tag`, `_profile`, `_security`, `_source`, `_id`, `_lastUpdated` are
     // published against Resource (R4B 3.1.1.4.1), not against each type.
-    final declared = model.searchParameters.lookup(resourceType, key.name);
+    final declared = lookupDefinition(resourceType, key.name);
     if (declared == null) return null;
     // 3.1.1.4.4, a SHALL: a modifier the type does not allow, or one this
     // package does not implement, is refused rather than answered wrongly.
@@ -1937,13 +1984,13 @@ class FhirDao<R extends FhirNode, T extends Object>
         : [
             for (final type in model.searchParameters.byType.keys)
               if (model.resourceTypeNames.contains(type) &&
-                  model.searchParameters.lookup(type, chainedKey.name) != null)
+                  lookupDefinition(type, chainedKey.name) != null)
                 type,
           ];
     if (candidates.isEmpty) return null;
     Expression<bool>? any;
     for (final target in candidates) {
-      if (model.searchParameters.lookup(target, chainedKey.name) == null) {
+      if (lookupDefinition(target, chainedKey.name) == null) {
         // `subject:Group.family`: the constrained type has no such
         // parameter, so nothing can match through it.
         any = any ?? const Constant(false);
@@ -2857,6 +2904,7 @@ class FhirDao<R extends FhirNode, T extends Object>
     CompartmentScope? compartment,
     Set<String>? only,
   }) async {
+    await _ready();
     final resourceTypeString = resourceType.toString();
 
     // One SQL statement when every part can be expressed as one; the Dart
@@ -2957,8 +3005,7 @@ class FhirDao<R extends FhirNode, T extends Object>
         // server. A chained key is the reference branch's to resolve.
         final parsedKey = SearchQueryKey.parse(paramName);
         if (parsedKey.chain == null &&
-            model.searchParameters.lookup(resourceTypeString, parsedKey.name) ==
-                null) {
+            lookupDefinition(resourceTypeString, parsedKey.name) == null) {
           continue;
         }
 
@@ -3026,6 +3073,7 @@ class FhirDao<R extends FhirNode, T extends Object>
     CompartmentScope? compartment,
     Set<String>? ids,
   }) async {
+    await _ready();
     final hasSearch = searchParameters != null && searchParameters.isNotEmpty;
     final hasHas = hasParameters != null && hasParameters.isNotEmpty;
     if (!hasSearch && !hasHas && compartment == null) {
@@ -3154,6 +3202,7 @@ class FhirDao<R extends FhirNode, T extends Object>
     Iterable<String>? types,
     DateTime? since,
   }) async {
+    await _ready();
     final members = model.compartmentDefinitions[scope.type];
     if (members == null) return const {};
     final wanted = types?.toSet();
@@ -3206,6 +3255,7 @@ class FhirDao<R extends FhirNode, T extends Object>
     String resourceType, {
     DateTime? since,
   }) async {
+    await _ready();
     final params = model.compartmentDefinitions[compartmentType]?[resourceType];
     if (params == null) return const {};
     final t = referenceSearchParameters;
@@ -3465,6 +3515,7 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// which is worse than an error the caller can act on.
   Future<void> _updateSearchParameters(R resource) async {
     final searchParams = extractSearchParameters(resource);
+    await _appendCustomRows(resource, searchParams);
     await batch((batch) {
       final resourceType = resource.fhirType;
       final id = resource.resourceId!;
@@ -3495,6 +3546,7 @@ class FhirDao<R extends FhirNode, T extends Object>
       final searchParameterLists = SearchParameterLists();
       for (final resource in stored) {
         final searchParams = extractSearchParameters(resource);
+        await _appendCustomRows(resource, searchParams);
         searchParameterLists.stringParams.addAll(searchParams.stringParams);
         searchParameterLists.tokenParams.addAll(searchParams.tokenParams);
         searchParameterLists.referenceParams
@@ -3682,7 +3734,7 @@ class FhirDao<R extends FhirNode, T extends Object>
     // whether `gt` on the front of a value is a comparator or the first two
     // letters of a name. Not having this fact is why the old code guessed from
     // the shape of the value.
-    final declared = model.searchParameters.lookup(resourceType, key.name);
+    final declared = lookupDefinition(resourceType, key.name);
 
     // R4 3.1.1.4.4, a SHALL: a modifier the parameter's type does not allow is
     // rejected, not ignored. Ignoring it silently changes what the query means
@@ -4983,8 +5035,7 @@ class FhirDao<R extends FhirNode, T extends Object>
     // when the resource type has a `version` parameter; the version is then
     // a token condition on the same resource.
     final bar = unescaped.lastIndexOf('|');
-    if (bar > 0 &&
-        model.searchParameters.lookup(resourceType, 'version') != null) {
+    if (bar > 0 && lookupDefinition(resourceType, 'version') != null) {
       final url = unescaped.substring(0, bar);
       final version = unescaped.substring(bar + 1);
       final v = alias(tokenSearchParameters, '${t.aliasedName}v');
@@ -5009,7 +5060,7 @@ class FhirDao<R extends FhirNode, T extends Object>
     // the same thing (this one is reached only for shapes the paged path
     // cannot build, which for a uri is none of its own modifiers).
     final matchingIds = <String>{};
-    final declared = model.searchParameters.lookup(resourceType, searchPath) ??
+    final declared = lookupDefinition(resourceType, searchPath) ??
         const SearchParameterDefinition('uri', []);
     for (final value in values) {
       final part = await _conditionFor(
@@ -5289,8 +5340,7 @@ class FhirDao<R extends FhirNode, T extends Object>
     // → code, value, quantity) and intersect resource-level matches, which
     // is neither the right components nor the same-element rule.
     final matchingIds = <String>{};
-    final declared =
-        model.searchParameters.lookup(resourceType, compositeParamName);
+    final declared = lookupDefinition(resourceType, compositeParamName);
     if (declared == null || declared.components.isEmpty) return matchingIds;
     for (final value in values) {
       final rows = await (selectOnly(compositeSearchParameters, distinct: true)
@@ -5325,6 +5375,7 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// accessed this person's record" with someone who was merely mentioned in
   /// it, which is worse than answering nothing.
   Future<String?> subjectOfCare(String resourceType, String id) async {
+    await _ready();
     if (resourceType == 'Patient') return id;
 
     final rows = await (select(referenceSearchParameters)
@@ -5421,10 +5472,10 @@ class FhirDao<R extends FhirNode, T extends Object>
           (
             rule.substring(1),
             true,
-            model.searchParameters.lookup(resourceType, rule.substring(1))
+            lookupDefinition(resourceType, rule.substring(1))
           )
         else
-          (rule, false, model.searchParameters.lookup(resourceType, rule)),
+          (rule, false, lookupDefinition(resourceType, rule)),
     ];
     final keys = <String, List<Comparable<Object>?>>{
       for (final r in results)

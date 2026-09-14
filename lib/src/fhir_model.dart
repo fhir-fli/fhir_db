@@ -1,6 +1,7 @@
 import 'package:fhir_db/src/search/search_parameter_types.dart';
 import 'package:fhir_db/src/search/search_query_key.dart';
 import 'package:fhir_node/fhir_node.dart';
+import 'package:fhir_path/fhir_path.dart';
 
 /// What the store needs from a FHIR version, supplied by a binding
 /// (`fhir_r4_db`, `fhir_r5_db`, `fhir_r6_db`).
@@ -78,6 +79,16 @@ abstract class FhirModel<R extends FhirNode, T extends Object> {
   /// which of those the store does not implement. R4B's tables unless the
   /// binding says otherwise; see [ModifierRules].
   ModifierRules get modifierRules => r4bModifierRules;
+
+  /// The FHIRPath engine over this version, with [hostServices] as what the
+  /// store answers to `resolve()` while indexing, or null when the model
+  /// has none. Uploaded `SearchParameter` resources are indexed by
+  /// evaluating their expressions with it; a model that returns null stores
+  /// them and indexes nothing by them.
+  Future<FHIRPathEngine>? createFhirPathEngine(
+    IEvaluationContext hostServices,
+  ) =>
+      null;
 }
 
 /// Reads over any [FhirNode] the store makes everywhere.

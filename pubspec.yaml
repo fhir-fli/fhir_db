@@ -4,7 +4,7 @@ description: >-
   history, a search-parameter index for every FHIR search type, compartments,
   encryption. FHIR-free — the model enters through FhirModel over FhirNode;
   bindings are fhir_r4/r5/r6_db.
-version: 0.13.0
+version: 0.14.0
 homepage: https://www.fhirfli.dev/
 repository: https://github.com/fhir-fli/fhir_db
 issue_tracker: https://github.com/fhir-fli/fhir_db/issues
@@ -37,6 +37,7 @@ dependencies:
   crypto: ^3.0.7
   drift: ^2.33.0
   fhir_node: ^0.6.0
+  fhir_path: ^0.14.2
   meta: ^1.16.0
   sqlite3: ^3.1.5
 

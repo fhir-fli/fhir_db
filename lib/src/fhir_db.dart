@@ -2,6 +2,7 @@ import 'package:drift/drift.dart';
 import 'package:fhir_db/src/fhir_dao.dart';
 import 'package:fhir_db/src/fhir_model.dart';
 import 'package:fhir_db/src/search/contained_index.dart';
+import 'package:fhir_db/src/search/custom_search_parameters.dart';
 import 'package:fhir_db/src/search/search_indexer.dart';
 import 'package:fhir_db/src/search/search_parameter_types.dart';
 import 'package:fhir_db/src/tables/tables.dart';
@@ -46,6 +47,59 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
 
   /// The row builders over [model].
   late final SearchIndexer indexer = SearchIndexer(model);
+
+  Future<CustomSearchParameters?>? _customSearchParameters;
+  CustomSearchParameters? _customLoaded;
+
+  /// The uploaded search parameters of this store, read from its stored
+  /// `SearchParameter` resources the first time they are needed, or null
+  /// when the model has no FHIRPath engine ([FhirModel.createFhirPathEngine]).
+  /// The DAO awaits this at every entry that saves, deletes or searches, so
+  /// the synchronous lookups inside a search read a loaded registry.
+  Future<CustomSearchParameters?> get customSearchParameters =>
+      _customSearchParameters ??= _loadCustomSearchParameters();
+
+  /// The registry once loaded, for the synchronous lookups; null before the
+  /// first [customSearchParameters] completes or when there is no engine.
+  CustomSearchParameters? get customSearchParametersIfLoaded => _customLoaded;
+
+  /// Reads the registry again: after a `SearchParameter` is saved or
+  /// deleted.
+  Future<CustomSearchParameters?> reloadCustomSearchParameters() {
+    _customSearchParameters = null;
+    return customSearchParameters;
+  }
+
+  Future<CustomSearchParameters?> _loadCustomSearchParameters() async {
+    final engine = model.createFhirPathEngine(
+      IndexHostServices(
+        (type, id) => model.fromJson('{"resourceType":"$type","id":"$id"}'),
+      ),
+    );
+    if (engine == null) {
+      return _customLoaded = null;
+    }
+    final registry = CustomSearchParameters(
+      await engine,
+      indexer: indexer,
+      knownTypes: model.resourceTypeNames,
+      builtIn: model.searchParameters,
+    );
+    final rows = await (select(resources)
+          ..where((r) => r.resourceType.equals('SearchParameter')))
+        .get();
+    for (final row in rows) {
+      try {
+        registry.add(model.fromJson(row.resource));
+      } catch (e) {
+        // Stored before validation existed, or under a model that had no
+        // engine: kept in the store, indexed by nothing, and named here so
+        // a server can say so.
+        registry.rejected.add((row.id, '$e'));
+      }
+    }
+    return _customLoaded = registry;
+  }
 
   /// The data-access object over this database.
   late final FhirDao<R, T> fhirDao = FhirDao<R, T>(this);
@@ -491,6 +545,7 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
         // search into a contained resource answered nothing until the
         // container was re-saved (fhirant REVIEW-2026-09-08 row 34).
         final extracted = extractWithContained(model, resource);
+        await (await customSearchParameters)?.appendRows(resource, extracted);
         lists
           ..stringParams.addAll(extracted.stringParams)
           ..tokenParams.addAll(extracted.tokenParams)

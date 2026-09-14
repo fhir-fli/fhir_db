@@ -31,3 +31,5 @@ doc/api/
 
 *db/*
 *assets/*
+# Local path overrides (unpublished siblings); CI writes its own.
+pubspec_overrides.yaml

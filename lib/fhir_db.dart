@@ -12,6 +12,7 @@ export 'src/fhir_model.dart';
 export 'src/has_parameter.dart';
 export 'src/search/compartment_scope.dart';
 export 'src/search/contained_index.dart';
+export 'src/search/custom_search_parameters.dart';
 export 'src/search/fhir_date.dart';
 export 'src/search/implicit_range.dart';
 export 'src/search/normalize.dart';
