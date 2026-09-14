@@ -310,7 +310,7 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
             // serves the 7, 9 and 10 steps: a database below 7 is
             // re-extracted once, not three times.
             await dropLegacyValueIndexes();
-            await rebuildSearchIndex();
+            await rebuildSearchIndex(includeUploaded: false);
           }
           if (from < 11) {
             await storeOpenBoundsAsInfinity();
@@ -490,7 +490,14 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
   /// (5 GB of JSON on the MIMIC load); inserted in batches. A resource that
   /// will not parse is skipped, so one bad row cannot keep a database shut;
   /// an insert that fails is a bug here and is not swallowed.
-  Future<void> rebuildSearchIndex() async {
+  Future<void> rebuildSearchIndex({bool includeUploaded = true}) async {
+    // The uploaded SearchParameters come from a query on `resources`, which
+    // cannot run while the database is still opening: a migration that
+    // rebuilds passes false (the query would wait for the migration and
+    // the migration for the query; measured as a 2-minute hang of the
+    // schema-13 upgrade test, 2026-09-14). Their rows return on the next
+    // rebuild, which is what `\$reindex` runs.
+    final custom = includeUploaded ? await customSearchParameters : null;
     final m = createMigrator();
     for (final table in <TableInfo<Table, dynamic>>[
       stringSearchParameters,
@@ -545,7 +552,7 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
         // search into a contained resource answered nothing until the
         // container was re-saved (fhirant REVIEW-2026-09-08 row 34).
         final extracted = extractWithContained(model, resource);
-        await (await customSearchParameters)?.appendRows(resource, extracted);
+        await custom?.appendRows(resource, extracted);
         lists
           ..stringParams.addAll(extracted.stringParams)
           ..tokenParams.addAll(extracted.tokenParams)

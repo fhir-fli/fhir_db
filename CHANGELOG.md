@@ -9,7 +9,9 @@
   extractor uses (`CustomSearchParameters`, loaded from the store on first
   use, reloaded when a SearchParameter is saved or deleted). The query side
   routes an uploaded code the same way (`FhirDao.lookupDefinition`).
-  `rebuildSearchIndex()` indexes existing resources by it: the reindex.
+  `rebuildSearchIndex()` indexes existing resources by it: the reindex
+  (a schema migration's rebuild passes `includeUploaded: false`, since the
+  store is still opening; run a reindex after upgrading).
   What HAPI/Smile CDR and the Azure FHIR service do for every parameter;
   the specification's own set keeps the generated extractor (measured 1.4
   to 6 times faster on the MIMIC sample).
