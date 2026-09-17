@@ -2376,7 +2376,7 @@ class FhirDao<R extends FhirNode, T extends Object>
             );
           case 'in':
           case 'not-in':
-            final codes = await _getCodesFromValueSet(value);
+            final codes = await expandValueSetByUrl(value);
             if (codes.isEmpty) {
               // `:in` an empty expansion matches nothing; `:not-in` excludes
               // nothing. A condition no row satisfies does both when negated
@@ -4028,7 +4028,7 @@ class FhirDao<R extends FhirNode, T extends Object>
 
       if (modifier == 'in') {
         // :in modifier — value is a ValueSet URL; match tokens in that ValueSet
-        final codes = await _getCodesFromValueSet(searchValue);
+        final codes = await expandValueSetByUrl(searchValue);
         if (codes.isNotEmpty) {
           for (final entry in codes) {
             final queryValue = entry.system != null
@@ -4047,7 +4047,7 @@ class FhirDao<R extends FhirNode, T extends Object>
 
       if (modifier == 'not-in') {
         // :not-in modifier — value is a ValueSet URL; exclude tokens in that VS
-        final codes = await _getCodesFromValueSet(searchValue);
+        final codes = await expandValueSetByUrl(searchValue);
         final allResourceIds = (await (select(resources)
                   ..where((tbl) => tbl.resourceType.equals(resourceType)))
                 .get())
@@ -4260,14 +4260,9 @@ class FhirDao<R extends FhirNode, T extends Object>
     return matchingIds;
   }
 
-  /// Extract all codes from a ValueSet (by URL) for :in/:not-in modifiers.
-  ///
-  /// Looks up the ValueSet by URL, then extracts codes from either
-  /// the pre-computed expansion or the compose.include rules.
-  Future<List<({String? system, String code})>> _getCodesFromValueSet(
-    String valueSetUrl,
-  ) async {
-    // Look up the ValueSet by URL
+  /// The expansion of the ValueSet whose url is [valueSetUrl]; what `:in`
+  /// and `:not-in` match against. See [expandValueSet].
+  Future<List<ExpandedCode>> expandValueSetByUrl(String valueSetUrl) async {
     final results = await search(
       resourceType: model.typeFromName('ValueSet')!,
       searchParameters: {
@@ -4275,10 +4270,23 @@ class FhirDao<R extends FhirNode, T extends Object>
       },
       count: 1,
     );
-    if (results.isEmpty) return [];
-    final valueSet = results.first;
+    if (results.isEmpty) throw ValueSetNotHeld(valueSetUrl);
+    return expandValueSet(results.first);
+  }
 
-    final codes = <({String? system, String code})>[];
+  /// The expansion of [valueSet]: the one implementation, for `:in` and
+  /// `:not-in` here and for a server's `$expand` and `$validate-code`.
+  ///
+  /// An expansion already on the resource is authoritative. Otherwise the
+  /// compose is evaluated: `include.concept` lists, whole-CodeSystem
+  /// includes, and `exclude.concept` lists taken back out. What the store
+  /// cannot evaluate is refused with a [ValueSetRefusal], never answered
+  /// from the parts it can (fhirant REVIEW-2026-09-06 finding 24,
+  /// REVIEW-2026-09-17 T1).
+  Future<List<ExpandedCode>> expandValueSet(R valueSet) async {
+    final valueSetUrl =
+        valueSet.childValue('url') ?? valueSet.childValue('id') ?? '?';
+    final codes = <ExpandedCode>[];
 
     // 1. Check pre-computed expansion first
     final contains = valueSet.child('expansion')?.children('contains');
@@ -4288,8 +4296,7 @@ class FhirDao<R extends FhirNode, T extends Object>
     }
 
     // 2. Expand from compose.include. What this store cannot evaluate is
-    // refused, not answered from the parts it can (fhirant REVIEW-2026-09-06
-    // finding 24).
+    // refused, not answered from the parts it can.
     final compose = valueSet.child('compose');
     final includes = compose?.children('include') ?? const <FhirNode>[];
     final excludes = compose?.children('exclude') ?? const <FhirNode>[];
@@ -4316,30 +4323,53 @@ class FhirDao<R extends FhirNode, T extends Object>
         for (final c in concepts) {
           final code = c.childValue('code');
           if (code != null) {
-            codes.add((system: includeSystem, code: code));
+            codes.add(
+              (
+                system: includeSystem,
+                code: code,
+                display: c.childValue('display'),
+              ),
+            );
           }
         }
       } else if (includeSystem != null) {
-        // Include all codes from the CodeSystem
+        // Include all codes from the CodeSystem: of the version asked for
+        // when one is, held, and held whole. Anything else is the
+        // specification's "wrong version, or incomplete definitions".
+        final includeVersion = include.childValue('version');
         final csResults = await search(
           resourceType: model.typeFromName('CodeSystem')!,
           searchParameters: {
             'url': [includeSystem],
+            if (includeVersion != null) 'version': [includeVersion],
           },
           count: 1,
         );
-        if (csResults.isNotEmpty) {
-          _flattenCodeSystemConcepts(
-            csResults.first.children('concept'),
+        if (csResults.isEmpty) {
+          throw CodeSystemNotEvaluable(
+            valueSetUrl,
             includeSystem,
-            codes,
+            version: includeVersion,
           );
         }
+        final content = csResults.first.childValue('content');
+        if (content != 'complete') {
+          throw CodeSystemNotEvaluable(
+            valueSetUrl,
+            includeSystem,
+            version: includeVersion,
+            content: content ?? '(none)',
+          );
+        }
+        _flattenCodeSystemConcepts(
+          csResults.first.children('concept'),
+          includeSystem,
+          codes,
+        );
       }
     }
 
-    // 3. compose.exclude concept lists take their codes back out. These
-    // used to be ignored, so an excluded code still matched `:in`.
+    // 3. compose.exclude concept lists take their codes back out.
     for (final exclude in excludes) {
       final excludeSystem = exclude.childValue('system');
       for (final c in exclude.children('concept')) {
@@ -4356,29 +4386,34 @@ class FhirDao<R extends FhirNode, T extends Object>
   }
 
   /// Recursively extract codes from ValueSet expansion contains.
-  void _extractFromContains(
-    List<FhirNode> contains,
-    List<({String? system, String code})> out,
-  ) {
+  void _extractFromContains(List<FhirNode> contains, List<ExpandedCode> out) {
     for (final entry in contains) {
       final code = entry.childValue('code');
       if (code != null) {
-        out.add((system: entry.childValue('system'), code: code));
+        out.add(
+          (
+            system: entry.childValue('system'),
+            code: code,
+            display: entry.childValue('display'),
+          ),
+        );
       }
       _extractFromContains(entry.children('contains'), out);
     }
   }
 
-  /// Recursively flatten CodeSystem concepts into (system, code) pairs.
+  /// Recursively flatten CodeSystem concepts into expansion codes.
   void _flattenCodeSystemConcepts(
     List<FhirNode> concepts,
     String system,
-    List<({String? system, String code})> out,
+    List<ExpandedCode> out,
   ) {
     for (final c in concepts) {
       final code = c.childValue('code');
       if (code != null) {
-        out.add((system: system, code: code));
+        out.add(
+          (system: system, code: code, display: c.childValue('display')),
+        );
       }
       _flattenCodeSystemConcepts(c.children('concept'), system, out);
     }

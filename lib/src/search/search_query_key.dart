@@ -317,7 +317,7 @@ bool isModifierAllowed(String type, String modifier) =>
 /// by `:in` or `:not-in`. Answering from the parts it does implement would
 /// be a wrong answer, so it is refused, as an unsupported modifier is
 /// (fhirant REVIEW-2026-09-06 finding 24).
-class UnsupportedValueSetCompose implements Exception {
+class UnsupportedValueSetCompose implements ValueSetRefusal {
   /// Creates the refusal for [valueSet], naming the [element] not implemented.
   const UnsupportedValueSetCompose(this.valueSet, this.element);
 
@@ -327,11 +327,99 @@ class UnsupportedValueSetCompose implements Exception {
   /// The compose element this store does not implement.
   final String element;
 
-  /// What the client is told.
+  @override
   String get message => 'ValueSet $valueSet uses compose.$element, which '
       'this server does not implement; :in and :not-in cannot be answered '
       'against it.';
 
   @override
+  String get issueCode => 'not-supported';
+
+  @override
   String toString() => message;
 }
+
+/// A value set this store cannot evaluate, so that anything needing its
+/// expansion (`$expand`, `$validate-code`, `:in`, `:not-in`) is refused
+/// rather than answered from the parts the store can evaluate.
+///
+/// R4B valueset-operation-expand.html, read whole 2026-09-17, verbatim:
+/// "When a server cannot correctly expand a value set because it does not
+/// fully understand the code systems (e.g. it has the wrong version, or
+/// incomplete definitions) then it SHALL return an error."
+abstract interface class ValueSetRefusal implements Exception {
+  /// What the client is told.
+  String get message;
+
+  /// The `OperationOutcome.issue.code` of the refusal: `not-found` for what
+  /// the store does not hold, `not-supported` for what it does not implement.
+  String get issueCode;
+}
+
+/// The ValueSet named is not in the store. It used to expand to no codes:
+/// `:in` matched nothing and `:not-in` matched every resource (fhirant
+/// REVIEW-2026-09-17 T1).
+class ValueSetNotHeld implements ValueSetRefusal {
+  /// Creates the refusal for the ValueSet url [valueSet].
+  const ValueSetNotHeld(this.valueSet);
+
+  /// The ValueSet's url as asked for.
+  final String valueSet;
+
+  @override
+  String get message => 'ValueSet $valueSet is not held by this server, so '
+      'nothing can be answered against it.';
+
+  @override
+  String get issueCode => 'not-found';
+
+  @override
+  String toString() => message;
+}
+
+/// A `compose.include` takes all of a CodeSystem the store cannot take all
+/// of: it does not hold it, does not hold the version asked for, or holds
+/// it with `content` other than `complete` (the specification's "incomplete
+/// definitions"). An include that lists its concepts needs no CodeSystem
+/// and is never refused for this.
+class CodeSystemNotEvaluable implements ValueSetRefusal {
+  /// Creates the refusal for [valueSet]'s include of [codeSystem].
+  const CodeSystemNotEvaluable(
+    this.valueSet,
+    this.codeSystem, {
+    this.version,
+    this.content,
+  });
+
+  /// The ValueSet's url or id.
+  final String valueSet;
+
+  /// The CodeSystem url the include names.
+  final String codeSystem;
+
+  /// The version the include asks for, when it asks for one.
+  final String? version;
+
+  /// The held CodeSystem's `content`, when it is held and not `complete`.
+  final String? content;
+
+  @override
+  String get message {
+    final which = version == null ? codeSystem : '$codeSystem|$version';
+    final why = content == null
+        ? 'this server does not hold it'
+        : 'this server holds it with content "$content", not the complete '
+            'code system';
+    return 'ValueSet $valueSet includes all of CodeSystem $which and $why, '
+        'so the value set cannot be expanded.';
+  }
+
+  @override
+  String get issueCode => content == null ? 'not-found' : 'not-supported';
+
+  @override
+  String toString() => message;
+}
+
+/// One code of an expansion ([FhirDao.expandValueSet]).
+typedef ExpandedCode = ({String? system, String code, String? display});

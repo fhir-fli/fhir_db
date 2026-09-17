@@ -2,6 +2,19 @@
 
 ## [0.14.0]
 
+- **One value set expansion, which refuses what it cannot evaluate.**
+  `FhirDao.expandValueSet(valueSet)` and `expandValueSetByUrl(url)` are
+  public and return system, code and display; `:in` and `:not-in` use them,
+  and a server's `$expand` and `$validate-code` should. **Breaking for
+  searches that used to answer wrongly:** a ValueSet the store does not hold
+  (`ValueSetNotHeld`), and a whole-CodeSystem include whose CodeSystem is
+  not held, not held in the version asked for, or held with `content` other
+  than `complete` (`CodeSystemNotEvaluable`), now throw. They used to expand
+  to no codes, so `:in` matched nothing and `:not-in` matched everything.
+  `include.version` is honoured. All refusals, `UnsupportedValueSetCompose`
+  included, implement `ValueSetRefusal` (`message`, `issueCode`). An include
+  that lists its concepts needs no CodeSystem and is not refused (fhirant
+  REVIEW-2026-09-17 T1, T2).
 - **Server-owned tags.** `FhirDao.serverOwnedTags` names `meta.tag` codings
   (`system|code`) only the server writes. A save made without
   `asServer: true` (new on `saveResource` and `saveResources`) neither adds
