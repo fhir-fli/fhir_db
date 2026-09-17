@@ -13,6 +13,22 @@ jobs:
       - uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
+      # fhir_db 0.14.0 needs fhir_path 0.14.2, which is pushed and not yet on
+      # pub.dev: `pub get` failed here on every push from 2026-09-14
+      # ("fhir_path ^0.14.2 which doesn't match any versions"). Resolve it
+      # from its repository, the way a local checkout resolves it from a
+      # path, through the gitignored pubspec_overrides.yaml so the pubspec
+      # stays as it will be published. Remove this step once fhir_path
+      # 0.14.2 is on pub.dev.
+      - name: fhir_path 0.14.2 from git until it is published
+        run: |
+          cat > pubspec_overrides.yaml <<'YAML'
+          dependency_overrides:
+            fhir_path:
+              git:
+                url: https://github.com/fhir-fli/fhir_path.git
+                ref: main
+          YAML
       - name: Install dependencies
         run: dart pub get
       - name: Verify formatting
