@@ -88,12 +88,14 @@ void main() {
     // write that tag: a server decision keyed on a field a client writes.
     const owned = {'system': 'urn:server', 'code': 'owned'};
     const other = {'system': 't', 'code': 'other'};
-    JsonNode tagged(String id, List<Map<String, String>> tags,
-            {String family = 'Smith'}) =>
+    JsonNode tagged(String id, List<Map<String, String>> tags) =>
         JsonNode.resource({
-          ...patient(id, family: family).map,
+          ...patient(id).map,
           'meta': {'tag': tags},
         });
+    const ownedQuery = {
+      '_tag': ['urn:server|owned'],
+    };
     List<dynamic>? tagsOf(JsonNode n) => (n.map['meta'] as Map)['tag'] as List?;
 
     setUp(() => dao.serverOwnedTags = {'urn:server|owned'});
@@ -103,16 +105,12 @@ void main() {
       expect(tagsOf(saved), [other]);
       final only = await dao.saveResource(tagged('p2', [owned]));
       expect(tagsOf(only), isNull);
-      expect(
-          await ids('Patient', {
-            '_tag': ['urn:server|owned']
-          }),
-          isEmpty);
+      expect(await ids('Patient', ownedQuery), isEmpty);
     });
 
     test('a batch save cannot add one', () async {
       await dao.saveResources([
-        tagged('p1', [owned, other])
+        tagged('p1', [owned, other]),
       ]);
       expect(tagsOf((await dao.getResource('Patient', 'p1'))!), [other]);
     });
@@ -120,20 +118,18 @@ void main() {
     test('the server writes one, singly and in a batch', () async {
       final one = await dao.saveResource(tagged('p1', [owned]), asServer: true);
       expect(tagsOf(one), [owned]);
-      await dao.saveResources([
-        tagged('p2', [owned])
-      ], asServer: true);
-      expect(
-        await ids('Patient', {
-          '_tag': ['urn:server|owned']
-        }),
-        ['p1', 'p2'],
+      await dao.saveResources(
+        [
+          tagged('p2', [owned]),
+        ],
+        asServer: true,
       );
+      expect(await ids('Patient', ownedQuery), ['p1', 'p2']);
     });
 
     test(
         'a save over a resource that carries one does not keep it: what a '
-        'client changed is no longer the server\'s copy', () async {
+        "client changed is no longer the server's copy", () async {
       await dao.saveResource(tagged('p1', [owned, other]), asServer: true);
       final v2 = await dao.saveResource(patient('p1', family: 'Jones'));
       expect(tagsOf(v2), [other]);
@@ -141,7 +137,7 @@ void main() {
       expect(tagsOf((await dao.getResource('Patient', 'p1'))!), [other]);
     });
 
-    test('with none declared, every tag is a client\'s to write', () async {
+    test("with none declared, every tag is a client's to write", () async {
       dao.serverOwnedTags = {};
       final saved = await dao.saveResource(tagged('p1', [owned]));
       expect(tagsOf(saved), [owned]);

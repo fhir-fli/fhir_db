@@ -15,6 +15,12 @@
   included, implement `ValueSetRefusal` (`message`, `issueCode`). An include
   that lists its concepts needs no CodeSystem and is not refused (fhirant
   REVIEW-2026-09-17 T1, T2).
+- **A save made `asServer` is not checked as an uploaded SearchParameter.**
+  A server's own definitions (fhirant loads the specification's 1,414) are
+  the ones the generated extractor implements; checked as uploads they are
+  all refused (no expression, or a code an upload may not redefine) and the
+  batch save throws. They are stored as documents, and the registry lists
+  them as not indexed by, as before. A client's save is checked as it was.
 - **Server-owned tags.** `FhirDao.serverOwnedTags` names `meta.tag` codings
   (`system|code`) only the server writes. A save made without
   `asServer: true` (new on `saveResource` and `saveResources`) neither adds

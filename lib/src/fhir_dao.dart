@@ -126,6 +126,13 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// A `SearchParameter` is checked before it is stored: what the store
   /// could not index by is refused ([InvalidSearchParameter]) rather than
   /// kept as a definition that finds nothing.
+  /// A client's `SearchParameter` is checked as an upload the store will
+  /// index by. A save made `asServer` is not: a server's own definitions
+  /// (fhirant's specification load) are the ones the generated extractor
+  /// already implements, some carry no expression, and an upload may not
+  /// redefine their codes, so checked as uploads they are all refused and
+  /// the load stops (fhirant 2026-09-17). Stored, they are documents; the
+  /// registry lists them as not indexed by, as it did.
   void _validateIfSearchParameter(R resource) {
     if (resource.fhirType != 'SearchParameter') return;
     attachedDatabase.customSearchParametersIfLoaded?.parse(resource);
@@ -220,7 +227,7 @@ class FhirDao<R extends FhirNode, T extends Object>
     final withId = _withIdIfNone(resource);
     final id = withId.resourceId!;
     await _ready();
-    _validateIfSearchParameter(withId);
+    if (!asServer) _validateIfSearchParameter(withId);
 
     final newResource = await transaction(() async {
       final existingRow =
@@ -293,7 +300,7 @@ class FhirDao<R extends FhirNode, T extends Object>
   }) async {
     if (resourcesList.isEmpty) return true;
     await _ready();
-    resourcesList.forEach(_validateIfSearchParameter);
+    if (!asServer) resourcesList.forEach(_validateIfSearchParameter);
     try {
       final newResources = <R>[];
       await transaction(() async {
