@@ -215,6 +215,7 @@ class FhirDao<R extends FhirNode, T extends Object>
     R resource, {
     String? ifMatchVersion,
     bool mergeTags = true,
+    bool asServer = false,
   }) async {
     final withId = _withIdIfNone(resource);
     final id = withId.resourceId!;
@@ -235,7 +236,12 @@ class FhirDao<R extends FhirNode, T extends Object>
           existingRow == null ? null : _metaJsonOfText(existingRow.resource);
       final updated = model.withMeta(
         withId,
-        _nextMeta(_metaJsonOf(withId), existingMeta, mergeTags: mergeTags),
+        _nextMeta(
+          _metaJsonOf(withId),
+          existingMeta,
+          mergeTags: mergeTags,
+          asServer: asServer,
+        ),
       );
       // The row, the superseded version's move into history and the index
       // rows go in together. A failure part way used to leave a resource
@@ -281,7 +287,10 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// that: 4,212 conformance resources whose first version was a second
   /// 48 MB copy of the same JSON (fhirant REVIEW-2026-09-06 §6.1); now no
   /// first version is copied.
-  Future<bool> saveResources(List<R> resourcesList) async {
+  Future<bool> saveResources(
+    List<R> resourcesList, {
+    bool asServer = false,
+  }) async {
     if (resourcesList.isEmpty) return true;
     await _ready();
     resourcesList.forEach(_validateIfSearchParameter);
@@ -299,7 +308,12 @@ class FhirDao<R extends FhirNode, T extends Object>
           final key = '${resource.fhirType}/${resource.resourceId!}';
           final updated = model.withMeta(
             resource,
-            _nextMeta(_metaJsonOf(resource), metas[key], mergeTags: true),
+            _nextMeta(
+              _metaJsonOf(resource),
+              metas[key],
+              mergeTags: true,
+              asServer: asServer,
+            ),
           );
           metas[key] = _metaJsonOf(updated);
           newResources.add(updated);
@@ -387,6 +401,7 @@ class FhirDao<R extends FhirNode, T extends Object>
     Map<String, dynamic>? submitted,
     Map<String, dynamic>? stored, {
     required bool mergeTags,
+    bool asServer = false,
   }) {
     final now = DateTime.now().toUtc();
     final storedVersion = stored?['versionId'] as String?;
@@ -413,6 +428,22 @@ class FhirDao<R extends FhirNode, T extends Object>
           meta.remove(field);
         } else {
           meta[field] = merged;
+        }
+      }
+    }
+    // [serverOwnedTags]: out of what was submitted and out of what the
+    // merge kept, unless the server itself is saving.
+    if (!asServer && serverOwnedTags.isNotEmpty) {
+      final tags = (meta['tag'] as List?)?.cast<Map<String, dynamic>>();
+      if (tags != null) {
+        final kept = [
+          for (final c in tags)
+            if (!serverOwnedTags.contains('${c['system']}|${c['code']}')) c,
+        ];
+        if (kept.isEmpty) {
+          meta.remove('tag');
+        } else {
+          meta['tag'] = kept;
         }
       }
     }
@@ -861,6 +892,17 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// to compare against), and an absolute search matches only its own
   /// spelling. fhirant sets this from its configuration.
   String? serverBaseUrl;
+
+  /// The `meta.tag` codings, as `system|code`, that only the server writes.
+  ///
+  /// A save made without `asServer` can neither add one nor keep one: it is
+  /// taken out of the submitted tags and out of the stored tags the save
+  /// would otherwise merge in, so a resource a client has written is never
+  /// marked as the server's. fhirant keys what `$backup` and a system
+  /// `$export` leave out on such a tag (its specification load), and a
+  /// client that could write the tag decided what a backup held (fhirant
+  /// REVIEW-2026-09-17 S3). Empty by default: every tag is a client's.
+  Set<String> serverOwnedTags = {};
 
   /// Whether the last [search] was paged in SQL (true) or resolved its ids
   /// on the general path (false). For tests: a search that gives the right

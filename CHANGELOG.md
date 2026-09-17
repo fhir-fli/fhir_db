@@ -2,6 +2,14 @@
 
 ## [0.14.0]
 
+- **Server-owned tags.** `FhirDao.serverOwnedTags` names `meta.tag` codings
+  (`system|code`) only the server writes. A save made without
+  `asServer: true` (new on `saveResource` and `saveResources`) neither adds
+  one nor keeps one through the tag merge; a resource a client has written
+  is never marked as the server's. Empty by default, so nothing changes for
+  a store that declares none. fhirant keys what `$backup` and a system
+  `$export` leave out on such a tag, and a client could write it (fhirant
+  REVIEW-2026-09-17 S3).
 - **Uploaded `SearchParameter` resources are indexed.** A stored
   `SearchParameter` with `status: active` is evaluated with the FHIRPath
   engine on every save of a resource its `base` covers, and its rows go to

@@ -82,6 +82,72 @@ void main() {
     ]);
   });
 
+  group('server-owned tags', () {
+    // fhirant REVIEW-2026-09-17 S3: fhirant leaves resources carrying its
+    // `spec` tag out of `$backup` and system `$export`, and a client could
+    // write that tag: a server decision keyed on a field a client writes.
+    const owned = {'system': 'urn:server', 'code': 'owned'};
+    const other = {'system': 't', 'code': 'other'};
+    JsonNode tagged(String id, List<Map<String, String>> tags,
+            {String family = 'Smith'}) =>
+        JsonNode.resource({
+          ...patient(id, family: family).map,
+          'meta': {'tag': tags},
+        });
+    List<dynamic>? tagsOf(JsonNode n) => (n.map['meta'] as Map)['tag'] as List?;
+
+    setUp(() => dao.serverOwnedTags = {'urn:server|owned'});
+
+    test('a save cannot add one, and keeps the tags beside it', () async {
+      final saved = await dao.saveResource(tagged('p1', [owned, other]));
+      expect(tagsOf(saved), [other]);
+      final only = await dao.saveResource(tagged('p2', [owned]));
+      expect(tagsOf(only), isNull);
+      expect(
+          await ids('Patient', {
+            '_tag': ['urn:server|owned']
+          }),
+          isEmpty);
+    });
+
+    test('a batch save cannot add one', () async {
+      await dao.saveResources([
+        tagged('p1', [owned, other])
+      ]);
+      expect(tagsOf((await dao.getResource('Patient', 'p1'))!), [other]);
+    });
+
+    test('the server writes one, singly and in a batch', () async {
+      final one = await dao.saveResource(tagged('p1', [owned]), asServer: true);
+      expect(tagsOf(one), [owned]);
+      await dao.saveResources([
+        tagged('p2', [owned])
+      ], asServer: true);
+      expect(
+        await ids('Patient', {
+          '_tag': ['urn:server|owned']
+        }),
+        ['p1', 'p2'],
+      );
+    });
+
+    test(
+        'a save over a resource that carries one does not keep it: what a '
+        'client changed is no longer the server\'s copy', () async {
+      await dao.saveResource(tagged('p1', [owned, other]), asServer: true);
+      final v2 = await dao.saveResource(patient('p1', family: 'Jones'));
+      expect(tagsOf(v2), [other]);
+      await dao.saveResources([patient('p1', family: 'Brown')]);
+      expect(tagsOf((await dao.getResource('Patient', 'p1'))!), [other]);
+    });
+
+    test('with none declared, every tag is a client\'s to write', () async {
+      dao.serverOwnedTags = {};
+      final saved = await dao.saveResource(tagged('p1', [owned]));
+      expect(tagsOf(saved), [owned]);
+    });
+  });
+
   test('update counts the version, merges tags, moves the old row to history',
       () async {
     await dao.saveResource(
