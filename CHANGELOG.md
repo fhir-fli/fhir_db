@@ -2,6 +2,17 @@
 
 ## [0.14.0]
 
+- **`rebuildSearchIndex` builds beside the live index and swaps in one
+  transaction.** It dropped the nine index tables first and refilled them
+  in place, so a search that ran meanwhile read a half-built index and a
+  save meanwhile failed on the missing table (fhirant REVIEW-2026-09-17
+  Q2). Now the tables are built again as `<table>_rebuild` (the current
+  schema, through the migrator), then one transaction drops the old tables,
+  renames the new ones in, creates the value indexes under their own names,
+  re-extracts every resource saved since the rebuild began and drops the
+  rows of every resource deleted since. Searches wait for that transaction
+  and never see between its steps. An event-loop turn between pages lets a
+  server whose store runs on its own isolate keep serving.
 - **A date with no zone is read on the UTC clock, in the index and in a
   search.** It was read in the process's local zone, which on a phone moves:
   a store indexed under one zone and searched under another lost every

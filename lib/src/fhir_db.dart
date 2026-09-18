@@ -477,8 +477,8 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
     );
   }
 
-  /// Drops every search index row and re-extracts all of them from the
-  /// stored resources, then recreates the value indexes and statistics.
+  /// Re-extracts every search index row from the stored resources, beside
+  /// the live index, and swaps the result in.
   ///
   /// The index is derived data, so this is always safe and is the one
   /// migration step for anything below schema 7. Public because a subclass
@@ -486,10 +486,26 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
   /// upgrade at the version where it takes this package's schema 7. Also the
   /// right call after a change to the generated extractor.
   ///
+  /// The nine tables are built again as `<table>_rebuild` while searches
+  /// keep answering from the tables in place; then one transaction drops
+  /// the old tables, renames the new ones in, creates the value indexes
+  /// under their own names (an index cannot be renamed, and the migration
+  /// steps drop indexes by name), re-extracts every resource saved since
+  /// the rebuild began (its rows went to the old tables) and drops the rows
+  /// of every resource deleted since. Searches wait for that transaction;
+  /// they never read between its steps. It used to drop the tables first
+  /// and refill them in place,
+  /// none of it in one transaction: a search that ran meanwhile read a
+  /// half-built index (fhirant REVIEW-2026-09-17 Q2: 14 different answers
+  /// to one query during one rebuild, from an SQL error to the truth), and
+  /// a save meanwhile failed on the missing table.
+  ///
   /// Paged through the resources table by keyset rather than read whole
-  /// (5 GB of JSON on the MIMIC load); inserted in batches. A resource that
-  /// will not parse is skipped, so one bad row cannot keep a database shut;
-  /// an insert that fails is a bug here and is not swallowed.
+  /// (5 GB of JSON on the MIMIC load); inserted in batches, with an
+  /// event-loop turn between pages so a server whose store runs on its own
+  /// isolate keeps serving. A resource that will not parse is skipped, so
+  /// one bad row cannot keep a database shut; an insert that fails is a bug
+  /// here and is not swallowed.
   Future<void> rebuildSearchIndex({bool includeUploaded = true}) async {
     // The uploaded SearchParameters come from a query on `resources`, which
     // cannot run while the database is still opening: a migration that
@@ -498,20 +514,18 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
     // schema-13 upgrade test, 2026-09-14). Their rows return on the next
     // rebuild, which is what `\$reindex` runs.
     final custom = includeUploaded ? await customSearchParameters : null;
+    final started = DateTime.now().millisecondsSinceEpoch;
+    const suffix = '_rebuild';
     final m = createMigrator();
-    for (final table in <TableInfo<Table, dynamic>>[
-      stringSearchParameters,
-      tokenSearchParameters,
-      referenceSearchParameters,
-      dateSearchParameters,
-      numberSearchParameters,
-      quantitySearchParameters,
-      uriSearchParameters,
-      compositeSearchParameters,
-      specialSearchParameters,
-    ]) {
-      await m.deleteTable(table.actualTableName);
-      await m.createTable(table);
+    for (final table in _searchTables) {
+      await customStatement(
+        'DROP TABLE IF EXISTS ${table.actualTableName}$suffix',
+      );
+      // The CURRENT schema under the twin's name, as Drift's own
+      // TableMigration builds its copy: a rebuild is also the migration
+      // step that reshapes these tables, so the old table's statement
+      // would be the old shape.
+      await m.createTable(table.createAlias('${table.actualTableName}$suffix'));
     }
     // Keyset over the primary key: each page starts where the last ended,
     // so the walk is linear. `LIMIT/OFFSET` had SQLite skip every earlier
@@ -539,46 +553,196 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
       lastId = stored.last.read<String>('id');
       final lists = SearchParameterLists();
       for (final row in stored) {
-        R resource;
-        try {
-          resource = model.fromJson(row.data['resource']! as String);
-        } catch (_) {
-          continue;
-        }
-        // The same extractor `FhirDao.saveResource` indexes with: the
-        // resource's own rows AND the `#Type` rows of what it contains. The
-        // rebuild used `updateSearchParameters` alone, so every schema
-        // upgrade that rebuilt dropped the contained rows and a chained
-        // search into a contained resource answered nothing until the
-        // container was re-saved (fhirant REVIEW-2026-09-08 row 34).
-        final extracted = extractWithContained(model, resource);
-        await custom?.appendRows(resource, extracted);
-        lists
-          ..stringParams.addAll(extracted.stringParams)
-          ..tokenParams.addAll(extracted.tokenParams)
-          ..referenceParams.addAll(extracted.referenceParams)
-          ..dateParams.addAll(extracted.dateParams)
-          ..numberParams.addAll(extracted.numberParams)
-          ..quantityParams.addAll(extracted.quantityParams)
-          ..uriParams.addAll(extracted.uriParams)
-          ..compositeParams.addAll(extracted.compositeParams)
-          ..specialParams.addAll(extracted.specialParams);
+        await _appendExtracted(row.data['resource']! as String, custom, lists);
       }
-      await batch((b) {
-        b
-          ..insertAll(stringSearchParameters, lists.stringParams)
-          ..insertAll(tokenSearchParameters, lists.tokenParams)
-          ..insertAll(referenceSearchParameters, lists.referenceParams)
-          ..insertAll(dateSearchParameters, lists.dateParams)
-          ..insertAll(numberSearchParameters, lists.numberParams)
-          ..insertAll(quantitySearchParameters, lists.quantityParams)
-          ..insertAll(uriSearchParameters, lists.uriParams)
-          ..insertAll(compositeSearchParameters, lists.compositeParams)
-          ..insertAll(specialSearchParameters, lists.specialParams);
-      });
+      await _insertLists(lists, suffix: suffix);
+      // A real event-loop turn: a server whose store runs on its own
+      // isolate (the CLI) could not answer one request during the rebuild
+      // otherwise, the awaits above all completing as microtasks.
+      await Future<void>.delayed(Duration.zero);
     }
-    await createValueIndexes();
+    await transaction(() async {
+      for (final table in searchTableNames) {
+        await customStatement('DROP TABLE $table');
+        await customStatement(
+          'ALTER TABLE $table$suffix RENAME TO $table',
+        );
+      }
+      await createValueIndexes();
+      // Saved since the rebuild began: their rows went to the tables just
+      // dropped, or the page that held them was read before the save.
+      // Deleted since: their rows may be in the new tables. `resources`
+      // holds the current version of every resource, so it decides both.
+      final changed = await customSelect(
+        'SELECT resource_type, id, resource FROM resources '
+        'WHERE last_updated >= ?',
+        variables: [Variable.withInt(started)],
+        readsFrom: {resources},
+      ).get();
+      if (changed.isNotEmpty) {
+        final lists = SearchParameterLists();
+        for (final row in changed) {
+          final type = row.read<String>('resource_type');
+          final id = row.read<String>('id');
+          for (final table in searchTableNames) {
+            await customStatement(
+              'DELETE FROM $table WHERE resource_type = ? AND id = ?',
+              [type, id],
+            );
+            await customStatement(
+              "DELETE FROM $table WHERE resource_type LIKE '#%' "
+              'AND id >= ? AND id < ?',
+              ['$type/$id#', '$type/$id\$'],
+            );
+          }
+          await _appendExtracted(
+            row.data['resource']! as String,
+            custom,
+            lists,
+          );
+        }
+        await _insertLists(lists);
+      }
+      for (final table in searchTableNames) {
+        await customStatement(
+          "DELETE FROM $table WHERE resource_type NOT LIKE '#%' "
+          'AND NOT EXISTS (SELECT 1 FROM resources r '
+          'WHERE r.resource_type = $table.resource_type '
+          'AND r.id = $table.id)',
+        );
+        await customStatement(
+          "DELETE FROM $table WHERE resource_type LIKE '#%' "
+          'AND NOT EXISTS (SELECT 1 FROM resources r '
+          "WHERE r.resource_type || '/' || r.id = "
+          "substr($table.id, 1, instr($table.id, '#') - 1))",
+        );
+      }
+    });
     await analyzeFully();
+  }
+
+  /// Parses [json] and appends the rows the index holds for it, with those
+  /// of what it contains and of the uploaded parameters, to [lists]. A
+  /// resource that will not parse adds nothing.
+  Future<void> _appendExtracted(
+    String json,
+    CustomSearchParameters? custom,
+    SearchParameterLists lists,
+  ) async {
+    R resource;
+    try {
+      resource = model.fromJson(json);
+    } catch (_) {
+      return;
+    }
+    // The same extractor `FhirDao.saveResource` indexes with: the
+    // resource's own rows AND the `#Type` rows of what it contains. The
+    // rebuild used `updateSearchParameters` alone, so every schema
+    // upgrade that rebuilt dropped the contained rows and a chained
+    // search into a contained resource answered nothing until the
+    // container was re-saved (fhirant REVIEW-2026-09-08 row 34).
+    final extracted = extractWithContained(model, resource);
+    await custom?.appendRows(resource, extracted);
+    lists
+      ..stringParams.addAll(extracted.stringParams)
+      ..tokenParams.addAll(extracted.tokenParams)
+      ..referenceParams.addAll(extracted.referenceParams)
+      ..dateParams.addAll(extracted.dateParams)
+      ..numberParams.addAll(extracted.numberParams)
+      ..quantityParams.addAll(extracted.quantityParams)
+      ..uriParams.addAll(extracted.uriParams)
+      ..compositeParams.addAll(extracted.compositeParams)
+      ..specialParams.addAll(extracted.specialParams);
+  }
+
+  /// The nine search index tables, in the order of [searchTableNames].
+  List<TableInfo<Table, dynamic>> get _searchTables => [
+        stringSearchParameters,
+        tokenSearchParameters,
+        referenceSearchParameters,
+        dateSearchParameters,
+        numberSearchParameters,
+        quantitySearchParameters,
+        uriSearchParameters,
+        compositeSearchParameters,
+        specialSearchParameters,
+      ];
+
+  /// Inserts [lists] into the nine tables, or into their `<table><suffix>`
+  /// twins: the companions know their columns, the SQL names the table.
+  Future<void> _insertLists(
+    SearchParameterLists lists, {
+    String suffix = '',
+  }) async {
+    final perTable = <(TableInfo<Table, dynamic>, List<Insertable<dynamic>>)>[
+      (stringSearchParameters, lists.stringParams),
+      (tokenSearchParameters, lists.tokenParams),
+      (referenceSearchParameters, lists.referenceParams),
+      (dateSearchParameters, lists.dateParams),
+      (numberSearchParameters, lists.numberParams),
+      (quantitySearchParameters, lists.quantityParams),
+      (uriSearchParameters, lists.uriParams),
+      (compositeSearchParameters, lists.compositeParams),
+      (specialSearchParameters, lists.specialParams),
+    ];
+    if (suffix.isEmpty) {
+      await batch((b) {
+        for (final (table, rows) in perTable) {
+          b.insertAll(table, rows);
+        }
+      });
+      return;
+    }
+    for (final (table, rows) in perTable) {
+      await _insertRaw('${table.actualTableName}$suffix', rows);
+    }
+  }
+
+  /// Multi-row inserts of [rows] into [table], grouped by the columns each
+  /// row sets, within SQLite's variable limit.
+  Future<void> _insertRaw(String table, List<Insertable<dynamic>> rows) async {
+    final byColumns = <String, List<List<Object?>>>{};
+    final columnsOf = <String, List<String>>{};
+    for (final row in rows) {
+      final columns = row.toColumns(true);
+      final names = columns.keys.toList()..sort();
+      final key = names.join(',');
+      columnsOf[key] = names;
+      byColumns.putIfAbsent(key, () => []).add([
+        for (final name in names) _valueOf(columns[name]!),
+      ]);
+    }
+    for (final entry in byColumns.entries) {
+      final names = columnsOf[entry.key]!;
+      // SQLITE_MAX_VARIABLE_NUMBER is 32766 in the bundled build.
+      final perStatement = 30000 ~/ names.length;
+      final tuple = '(${List.filled(names.length, '?').join(', ')})';
+      for (var i = 0; i < entry.value.length; i += perStatement) {
+        final chunk = entry.value.sublist(
+          i,
+          i + perStatement > entry.value.length
+              ? entry.value.length
+              : i + perStatement,
+        );
+        // Through Drift's variables, so a DateTime is stored the way the
+        // column mapping stores it, as a batch insert would.
+        await customInsert(
+          'INSERT INTO $table (${names.join(', ')}) VALUES '
+          '${List.filled(chunk.length, tuple).join(', ')}',
+          variables: [
+            for (final values in chunk)
+              for (final value in values) Variable<Object>(value),
+          ],
+        );
+      }
+    }
+  }
+
+  /// The Dart value a companion's column expression carries.
+  static Object? _valueOf(Expression<Object> expression) {
+    if (expression is Variable<Object>) return expression.value;
+    if (expression is Constant<Object>) return expression.value;
+    throw StateError('unexpected column expression $expression');
   }
 
   /// The indexes every search table is read and written through.
@@ -605,6 +769,11 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
   /// reason as [ensurePlannerStatistics]: a subclass with its own
   /// [migration] must call it from there.
   Future<void> createValueIndexes() async {
+    Future<void> create(String name, String table, String definition) =>
+        customStatement(
+          'CREATE INDEX IF NOT EXISTS $name ON $table$definition',
+        );
+
     const covers = [
       ('string_search_parameters', 'value', 'string_value'),
       ('string_search_parameters', 'exact', 'exact_value'),
@@ -628,15 +797,17 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
       ('special_search_parameters', 'value', 'special_value'),
     ];
     for (final (table, tag, columns) in covers) {
-      await customStatement(
-        'CREATE INDEX IF NOT EXISTS idx_${table}_${tag}_cover '
-        'ON $table(resource_type, search_name, $columns, id)',
+      await create(
+        'idx_${table}_${tag}_cover',
+        table,
+        '(resource_type, search_name, $columns, id)',
       );
     }
     for (final table in searchTableNames) {
-      await customStatement(
-        'CREATE INDEX IF NOT EXISTS idx_${table}_owner '
-        'ON $table(resource_type, id)',
+      await create(
+        'idx_${table}_owner',
+        table,
+        '(resource_type, id)',
       );
       // Contained resources' rows are filed under `#Type` with an id of
       // `<container type>/<container id>#<contained id>` (search §3.1.1.5.5,
@@ -645,18 +816,21 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
       // with resource_type and cannot serve that. The WHERE here is the
       // WHERE the delete uses, which is what lets SQLite apply a partial
       // index. Empty, and free, on a database with no contained resources.
-      await customStatement(
-        'CREATE INDEX IF NOT EXISTS idx_${table}_contained '
-        "ON $table(id) WHERE resource_type LIKE '#%'",
+      await create(
+        'idx_${table}_contained',
+        table,
+        "(id) WHERE resource_type LIKE '#%'",
       );
     }
-    await customStatement(
-      'CREATE INDEX IF NOT EXISTS idx_resources_type_updated '
-      'ON resources(resource_type, last_updated)',
+    await create(
+      'idx_resources_type_updated',
+      'resources',
+      '(resource_type, last_updated)',
     );
-    await customStatement(
-      'CREATE INDEX IF NOT EXISTS idx_resources_history_type_updated '
-      'ON resources_history(resource_type, last_updated)',
+    await create(
+      'idx_resources_history_type_updated',
+      'resources_history',
+      '(resource_type, last_updated)',
     );
   }
 
