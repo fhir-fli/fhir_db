@@ -41,11 +41,17 @@ class FhirDateValue {
   /// or instant.
   ///
   /// The instant honours the value's zone: `Z` or an offset is read in UTC
-  /// (a `+02:00` wall clock is two hours ahead of UTC); a value with no
-  /// zone is in the local zone, which is what R4B search.html 3.1.1.4.7
-  /// asks: "Where both search parameters and resource element date times
-  /// do not have time zones, the servers local time zone should be
-  /// assumed".
+  /// (a `+02:00` wall clock is two hours ahead of UTC). A value with no
+  /// zone is read as a UTC wall clock, on both sides of a search: R4B
+  /// search.html 3.1.1.4.7 (read whole 2026-09-17), "Where both search
+  /// parameters and resource element date times do not have time zones,
+  /// the servers local time zone should be assumed", and any one zone on
+  /// both sides answers that comparison the same. It used to be the
+  /// process's local zone, which on a phone moves: a store indexed under
+  /// one zone and searched under another lost every equality match on a
+  /// zone-less date, `birthDate` first of all (fhirant REVIEW-2026-09-17
+  /// Q1). A zone-less value compared against a zoned one is compared on
+  /// the UTC clock; the page says nothing of that case.
   static FhirDateValue? tryParse(String written) {
     final m = _fhirDate.firstMatch(written.trim());
     if (m == null) return null;
@@ -98,7 +104,7 @@ class FhirDateValue {
         low = wallClock.subtract(offset * sign);
       }
     } else {
-      low = DateTime(
+      low = DateTime.utc(
         year,
         month ?? 1,
         day ?? 1,

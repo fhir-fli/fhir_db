@@ -17,9 +17,10 @@ final RegExp _searchDate = RegExp(
 /// precision, exactly as a stored value does ([dateTimeRange]): `2013` is
 /// the year, `2013-01-14` the day. §3.1.1.4.7: "When the date parameter is
 /// not fully specified, matches against it are based on the behavior of
-/// intervals". A value with no offset is in the local zone, and "Where both
-/// search parameters and resource element date times do not have time
-/// zones, the servers local time zone should be assumed".
+/// intervals". A value with no offset is read on the UTC clock, as a stored
+/// one is ([FhirDateValue.tryParse]), so "Where both search parameters and
+/// resource element date times do not have time zones" the comparison is
+/// the same in every zone the device is in.
 ///
 /// The grammar is checked before parsing because the primitive parser is
 /// lenient at the tail: `2013-1-4` parsed as the year 2013, and would have

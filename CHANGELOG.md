@@ -2,6 +2,15 @@
 
 ## [0.14.0]
 
+- **A date with no zone is read on the UTC clock, in the index and in a
+  search.** It was read in the process's local zone, which on a phone moves:
+  a store indexed under one zone and searched under another lost every
+  equality match on a zone-less date, `birthDate` first of all (fhirant
+  REVIEW-2026-09-17 Q1). R4B search 3.1.1.4.7 asks that "the servers local
+  time zone should be assumed" where neither side has a zone; any one zone
+  on both sides answers that the same, and UTC does not move. A zone-less
+  value against a zoned one is now compared on the UTC clock. Stores indexed
+  before this need a reindex.
 - **One value set expansion, which refuses what it cannot evaluate.**
   `FhirDao.expandValueSet(valueSet)` and `expandValueSetByUrl(url)` are
   public and return system, code and display; `:in` and `:not-in` use them,

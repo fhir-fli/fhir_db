@@ -275,8 +275,10 @@ void main() {
     test('a date covers its own precision (R4B 3.1.1.4.7)', () {
       final rows =
           indexer.dateRows(node('date', '2013-01-10'), 'P', 'p', 0, 'P.b', 0);
-      expect(rows.single.dateValue.value, DateTime(2013, 1, 10));
-      expect(rows.single.dateValueEnd.value, DateTime(2013, 1, 11));
+      // On the UTC clock, whatever zone the process runs in (fhirant
+      // REVIEW-2026-09-17 Q1).
+      expect(rows.single.dateValue.value, DateTime.utc(2013, 1, 10));
+      expect(rows.single.dateValueEnd.value, DateTime.utc(2013, 1, 11));
       expect(rows.single.dateString.value, '2013-01-10');
     });
 
@@ -305,8 +307,8 @@ void main() {
         'E.p',
         0,
       );
-      expect(rows.single.dateValue.value, DateTime(2013));
-      expect(rows.single.dateValueEnd.value, DateTime(2013, 1, 11));
+      expect(rows.single.dateValue.value, DateTime.utc(2013));
+      expect(rows.single.dateValueEnd.value, DateTime.utc(2013, 1, 11));
       final open = indexer.dateRows(
         node('Period', {'start': '2013-01-01'}),
         'E',
