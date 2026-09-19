@@ -3431,10 +3431,26 @@ class FhirDao<R extends FhirNode, T extends Object>
       final one = t.searchName.equals(p);
       byParam = byParam == null ? one : (byParam | one);
     }
-    return t.resourceType.equals(resourceType) &
+    var where = t.resourceType.equals(resourceType) &
         byParam! &
         t.referenceResourceType.equals(scope.type) &
         t.referenceIdPart.equals(scope.id);
+    // The same base rule as the reference search (_referenceCondition) and
+    // _include (referenceTargets): with the server's base known, a
+    // reference to `Patient/p1` on ANOTHER server is not this server's
+    // `Patient/p1`, so the resource carrying it is not in the compartment.
+    // Membership used to match on type and id alone (fhirant
+    // REVIEW-2026-09-17 A16): a patient-scoped token read records that
+    // pointed at a same-named patient elsewhere.
+    final base = serverBaseUrl;
+    if (base != null) {
+      final baseWithSlash = base.endsWith('/') ? base : '$base/';
+      where = where &
+          (t.referenceBaseUrl.isNull() |
+              t.referenceBaseUrl.equals(base) |
+              t.referenceBaseUrl.equals(baseWithSlash));
+    }
+    return where;
   }
 
   /// The compartment context as one part of a SQL-paged search: for a member

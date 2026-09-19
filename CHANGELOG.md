@@ -2,6 +2,11 @@
 
 ## [0.14.0]
 
+- **Compartment membership honours `serverBaseUrl`** (fhirant
+  REVIEW-2026-09-17 A16): with the base known, a resource whose reference
+  is `Patient/p1` on ANOTHER server is not in this server's `Patient/p1`
+  compartment, the same rule the reference search and `_include` already
+  applied. Without a base the store cannot tell and admits it, as before.
 - **`searchContainedIds`** (fhirant REVIEW-2026-09-17 Q8): the contained
   resources of a type that match the criteria, as the composite ids the
   index files them under (`[containerType]/[containerId]#[containedId]`,
