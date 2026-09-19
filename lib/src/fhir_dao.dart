@@ -942,32 +942,6 @@ class FhirDao<R extends FhirNode, T extends Object>
         only: ids,
       );
 
-  /// The CONTAINED resources of [resourceType] that match
-  /// [searchParameters]: their composite ids,
-  /// `[containerType]/[containerId]#[containedId]`, as the index files them
-  /// under the type name `#[resourceType]` (contained_index.dart).
-  ///
-  /// R4B search.html 3.1.1.5.5, read whole 2026-09-19: "By default, search
-  /// results only include resources that are not contained in other
-  /// resources", and `_contained` "true: return only contained resources",
-  /// "both: return both contained and non-contained (normal) resources".
-  /// [searchIds] is the normal set; this is the contained one, and a server
-  /// answering `_contained` unions or chooses between them. The rows have
-  /// been indexed since schema 7 and were reachable only through chaining
-  /// (fhirant REVIEW-2026-09-17 Q8).
-  Future<Set<String>> searchContainedIds({
-    required T resourceType,
-    Map<String, List<String>>? searchParameters,
-    List<HasParameter>? hasParameters,
-    CompartmentScope? compartment,
-  }) =>
-      _matchingIdsFor(
-        '#$resourceType',
-        searchParameters: searchParameters ?? const {},
-        hasParameters: hasParameters,
-        compartment: compartment,
-      );
-
   /// Above this many comma-separated `_id` values in one repetition, the
   /// search takes the set path rather than SQL. In SQL each value is one
   /// bound `id = ?` in an OR chain, so a list of tens of thousands of ids (a
@@ -2991,25 +2965,9 @@ class FhirDao<R extends FhirNode, T extends Object>
     List<HasParameter>? hasParameters,
     CompartmentScope? compartment,
     Set<String>? only,
-  }) =>
-      _matchingIdsFor(
-        resourceType.toString(),
-        searchParameters: searchParameters,
-        hasParameters: hasParameters,
-        compartment: compartment,
-        only: only,
-      );
-
-  /// [_matchingIds] by the index's type name, which for a contained
-  /// resource is `#Type` ([searchContainedIds]).
-  Future<Set<String>> _matchingIdsFor(
-    String resourceTypeString, {
-    Map<String, List<String>>? searchParameters,
-    List<HasParameter>? hasParameters,
-    CompartmentScope? compartment,
-    Set<String>? only,
   }) async {
     await _ready();
+    final resourceTypeString = resourceType.toString();
 
     // One SQL statement when every part can be expressed as one; the Dart
     // set arithmetic below is only for the shapes that cannot.
