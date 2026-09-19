@@ -3479,6 +3479,59 @@ class FhirDao<R extends FhirNode, T extends Object>
     return _IndexCondition(t, t.id, where);
   }
 
+  /// Removes every [resourceType] resource whose current version was last
+  /// updated before [cutoff]: the current row, every history row of that
+  /// id, and its index rows. Returns how many resources went. No tombstone
+  /// is written: this is retention, not a delete a client asked for, and
+  /// the point is that nothing of the record remains.
+  ///
+  /// Written for fhirant's AuditEvent retention (REVIEW-2026-09-17 A16):
+  /// every read wrote an event and nothing ever removed one.
+  Future<int> purgeResourcesLastUpdatedBefore(
+    T resourceType,
+    DateTime cutoff,
+  ) async {
+    final resourceTypeString = resourceType.toString();
+    await _ready();
+    final rows = await (selectOnly(resources)
+          ..addColumns([resources.id])
+          ..where(
+            resources.resourceType.equals(resourceTypeString) &
+                resources.lastUpdated
+                    .isSmallerThanValue(cutoff.millisecondsSinceEpoch),
+          ))
+        .get();
+    final ids = [for (final r in rows) r.read(resources.id)!];
+    if (ids.isEmpty) return 0;
+    await transaction(() async {
+      for (var start = 0; start < ids.length; start += maxIdListInSql) {
+        final chunk = ids.sublist(
+          start,
+          start + maxIdListInSql > ids.length
+              ? ids.length
+              : start + maxIdListInSql,
+        );
+        await batch((b) {
+          for (final id in chunk) {
+            _deleteSearchParams(b, resourceTypeString, id);
+          }
+          b
+            ..deleteWhere(
+              resources,
+              (t) =>
+                  t.resourceType.equals(resourceTypeString) & t.id.isIn(chunk),
+            )
+            ..deleteWhere(
+              resourcesHistory,
+              (t) =>
+                  t.resourceType.equals(resourceTypeString) & t.id.isIn(chunk),
+            );
+        });
+      }
+    });
+    return ids.length;
+  }
+
   // ──────────────────────────────────────────────────────────────────────────
   // Sync Operations
   // ──────────────────────────────────────────────────────────────────────────

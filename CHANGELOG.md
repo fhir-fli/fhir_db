@@ -2,6 +2,11 @@
 
 ## [0.14.0]
 
+- **`purgeResourcesLastUpdatedBefore(type, cutoff)`** (fhirant
+  REVIEW-2026-09-17 A16): removes every resource of a type whose current
+  version is older than the cutoff, with its history and index rows, and no
+  tombstone. Retention, not a client delete; fhirant sweeps AuditEvents
+  with it.
 - **Compartment membership honours `serverBaseUrl`** (fhirant
   REVIEW-2026-09-17 A16): with the base known, a resource whose reference
   is `Patient/p1` on ANOTHER server is not in this server's `Patient/p1`
