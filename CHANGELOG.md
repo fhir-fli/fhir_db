@@ -2,6 +2,12 @@
 
 ## [0.14.0]
 
+- **`searchContainedIds`** (fhirant REVIEW-2026-09-17 Q8): the contained
+  resources of a type that match the criteria, as the composite ids the
+  index files them under (`[containerType]/[containerId]#[containedId]`,
+  type name `#[Type]`, indexed since schema 7). `searchIds` is the normal
+  set; a server answering R4B search.html 3.1.1.5.5 `_contained` unions or
+  chooses between the two.
 - **`:identifier=|[value]` matches only an identifier with no system**
   (fhirant REVIEW-2026-09-17 Q5). R4B 3.1.1.4.12: with `:identifier` "the
   search value works as a token search", and 3.1.1.4.10 gives the leading
