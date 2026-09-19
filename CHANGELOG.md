@@ -2,6 +2,13 @@
 
 ## [0.14.0]
 
+- **`:identifier=|[value]` matches only an identifier with no system**
+  (fhirant REVIEW-2026-09-17 Q5). R4B 3.1.1.4.12: with `:identifier` "the
+  search value works as a token search", and 3.1.1.4.10 gives the leading
+  pipe its own meaning: the Identifier "has no system property". It was
+  read as a bare value, so `subject:identifier=|42` also matched a
+  reference whose identifier has a system. One condition builder now serves
+  both search paths.
 - **`:missing` takes `true` or `false` and nothing else** (fhirant
   REVIEW-2026-09-17 Q4). R4B search.html 3.1.1.4.4: ":missing; e.g.
   gender:missing=true (or false)". Any other value was read as false, so

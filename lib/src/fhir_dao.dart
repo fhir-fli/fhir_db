@@ -2447,15 +2447,11 @@ class FhirDao<R extends FhirNode, T extends Object>
           case 'missing':
             return _IndexCondition(t, t.id, path, negated: value == 'true');
           case 'identifier':
-            final parts = splitEscaped(value, '|');
-            var where = path &
-                t.identifierValue.equals(
-                  parts.length > 1 ? parts[1] : unescapeValue(value),
-                );
-            if (parts.length > 1 && parts[0].isNotEmpty) {
-              where = where & t.identifierSystem.equals(parts[0]);
-            }
-            return _IndexCondition(t, t.id, where);
+            return _IndexCondition(
+              t,
+              t.id,
+              path & _identifierCondition(t, value),
+            );
           case 'below':
             // 3.1.1.4.13: "The modifier :below is used with canonical
             // references, to control whether the version is considered in
@@ -4198,6 +4194,34 @@ class FhirDao<R extends FhirNode, T extends Object>
 
   /// The WHERE for one plain token value, as a typed expression, so it can be
   /// run on its own or nested as `id IN (SELECT …)` inside another.
+  /// The condition for `[reference]:identifier=[value]` on [t].
+  ///
+  /// R4B search.html 3.1.1.4.12 (read whole 2026-09-07): ":identifier allows
+  /// for searching by the identifier rather than the literal reference ...
+  /// the search value works as a token search", and the token forms of
+  /// 3.1.1.4.10 (read whole): "[parameter]=[code]" matches under any system,
+  /// "[parameter]=[system]|[code]" under that system, and
+  /// "[parameter]=|[code]: the value of [code] matches a Coding.code or
+  /// Identifier.value, and the Coding/Identifier has no system property".
+  /// The leading-pipe form was read as a bare code here, so
+  /// `subject:identifier=|42` also matched a reference whose identifier
+  /// HAS a system (fhirant REVIEW-2026-09-17 Q5). Both search paths call
+  /// this.
+  Expression<bool> _identifierCondition(
+    $ReferenceSearchParametersTable t,
+    String value,
+  ) {
+    final parts = splitEscaped(value, '|');
+    if (parts.length < 2) {
+      return t.identifierValue.equals(unescapeValue(value));
+    }
+    final where = t.identifierValue.equals(parts[1]);
+    if (parts[0].isEmpty) {
+      return where & t.identifierSystem.isNull();
+    }
+    return where & t.identifierSystem.equals(parts[0]);
+  }
+
   Expression<bool> _tokenCondition(
     String resourceType,
     String searchPath,
@@ -5363,17 +5387,8 @@ class FhirDao<R extends FhirNode, T extends Object>
         // resource — an Observation whose subject carries the MRN matches,
         // while one that merely points at a Patient holding that MRN does not.
         if (modifier == 'identifier') {
-          final parts = splitEscaped(value, '|');
-          final identifierValue =
-              parts.length > 1 ? parts[1] : unescapeValue(value);
-          final identifierSystem = parts.length > 1 ? parts[0] : null;
           whereCondition = whereCondition &
-              referenceSearchParameters.identifierValue.equals(identifierValue);
-          if (identifierSystem != null && identifierSystem.isNotEmpty) {
-            whereCondition = whereCondition &
-                referenceSearchParameters.identifierSystem
-                    .equals(identifierSystem);
-          }
+              _identifierCondition(referenceSearchParameters, value);
           query.where((tbl) => whereCondition);
           for (final row in await query.get()) {
             matchingIds.add(row.id);
