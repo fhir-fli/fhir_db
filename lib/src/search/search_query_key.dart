@@ -248,12 +248,20 @@ const r4bModifierRules = ModifierRules(
 /// `SearchParameter.modifier` on none of its 1,414 definitions, so the allowed
 /// set is not carried in the data. It comes from the tables in search.html.
 const modifiersByType = <String, Set<String>>{
-  // ":missing ... applies to all parameter types except composite".
-  'string': {'missing', 'exact', 'contains', 'text'},
+  // R4B search.html 3.1.1.4.4, section read whole 2026-09-18, verbatim:
+  // "For all parameters (except combination): :missing" · "For string:
+  // :exact ... or :contains" · "For token: :text ... Other defined modifiers
+  // are :in, :below, :above and :not-in" · "For reference: :[type] where
+  // [type] is the name of a type of resource, :identifier, and, for some
+  // parameters, :above and :below" · "For uri: :below, :above".
+  // Before fhirant REVIEW-2026-09-17 Q3 string carried `text` and reference
+  // a literal `type`: `name:text=tex` was answered as a starts-with match
+  // and `subject:type=Patient` as nothing, where the page's SHALL is a 400.
+  'string': {'missing', 'exact', 'contains'},
   'token': {'missing', 'text', 'not', 'in', 'not-in', 'of-type', 'below'},
   // A reference also takes ":[ResourceType]", which is not a fixed word and is
-  // checked separately.
-  'reference': {'missing', 'identifier', 'type', 'below'},
+  // checked separately (ModifierRules.isAllowed).
+  'reference': {'missing', 'identifier', 'below'},
   'uri': {'missing', 'above', 'below'},
   'date': {'missing'},
   'number': {'missing'},

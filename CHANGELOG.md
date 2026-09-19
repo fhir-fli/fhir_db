@@ -2,6 +2,13 @@
 
 ## [0.14.0]
 
+- **`:text` on a string parameter and a literal `:type` on a reference are
+  refused** (fhirant REVIEW-2026-09-17 Q3). R4B search.html 3.1.1.4.4, read
+  whole: string takes `:exact` and `:contains`; reference takes `:[type]`,
+  a placeholder for a resource type, `:identifier`, `:above` and `:below`.
+  `modifiersByType` listed `text` under string and the word `type` under
+  reference, so `name:text=tex` was answered as a starts-with match and
+  `subject:type=Patient` as nothing, where the page's SHALL is a 400.
 - **`rebuildSearchIndex` builds beside the live index and swaps in one
   transaction.** It dropped the nine index tables first and refilled them
   in place, so a search that ran meanwhile read a half-built index and a
