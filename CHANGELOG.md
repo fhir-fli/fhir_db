@@ -2,6 +2,11 @@
 
 ## [0.14.0]
 
+- **`:missing` takes `true` or `false` and nothing else** (fhirant
+  REVIEW-2026-09-17 Q4). R4B search.html 3.1.1.4.4: ":missing; e.g.
+  gender:missing=true (or false)". Any other value was read as false, so
+  `gender:missing=maybe` answered "present"; it is `InvalidSearchValue` now,
+  on both search paths, and the value is read case-insensitively.
 - **`:text` on a string parameter and a literal `:type` on a reference are
   refused** (fhirant REVIEW-2026-09-17 Q3). R4B search.html 3.1.1.4.4, read
   whole: string takes `:exact` and `:contains`; reference takes `:[type]`,

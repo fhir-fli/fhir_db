@@ -1951,11 +1951,13 @@ class FhirDao<R extends FhirNode, T extends Object>
             model.modifierRules.isUnsupported(declared.type, modifier),
       );
     }
+    final checkedValue =
+        modifier == 'missing' ? _missingValue(key.name, value) : value;
     try {
       return await _conditionForKeyUnchecked(
         resourceType,
         key,
-        value,
+        checkedValue,
         declared,
         aliasName: aliasName,
         nextAlias: nextAlias,
@@ -1968,6 +1970,21 @@ class FhirDao<R extends FhirNode, T extends Object>
         type: declared.type,
       );
     }
+  }
+
+  /// The value of `:missing`, lower-cased: `true` or `false`, and nothing
+  /// else. R4B search.html 3.1.1.4.4, read whole 2026-09-18: ":missing;
+  /// e.g. gender:missing=true (or false)". Any other value used to be read
+  /// as false, so `gender:missing=maybe` answered "present" (fhirant
+  /// REVIEW-2026-09-17 Q4); it is [InvalidSearchValue] now.
+  String _missingValue(String parameter, String value) {
+    final v = value.trim().toLowerCase();
+    if (v == 'true' || v == 'false') return v;
+    throw InvalidSearchValue(
+      parameter: '$parameter:missing',
+      value: value,
+      type: 'boolean',
+    );
   }
 
   Future<_IndexCondition?> _conditionForKeyUnchecked(
@@ -3811,9 +3828,9 @@ class FhirDao<R extends FhirNode, T extends Object>
     // the complement rather than a second query.
     if (modifier == 'missing') {
       final absent = await _searchMissingParameter(resourceType, searchPath);
-      final wantsAbsent = paramValues.any(
-        (v) => v.trim().toLowerCase() == 'true',
-      );
+      final wantsAbsent = paramValues
+          .map((v) => _missingValue(key.name, v))
+          .any((v) => v == 'true');
       if (wantsAbsent) {
         return absent;
       }
