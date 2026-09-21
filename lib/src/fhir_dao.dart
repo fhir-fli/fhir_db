@@ -4976,9 +4976,11 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// which is a two-figure range. By the rule as worded, one significant
   /// figure at the hundreds place is [50, 150), and that is what this does.
   /// HAPI uses exact matching for eq/ne ("per discussions with Grahame
-  /// Grieve", NumberPredicateBuilder.java) and a point comparison for
-  /// gt/lt; Microsoft's server widens by half a unit of the last DECIMAL
-  /// place. Neither follows the text, so the text is what is implemented.
+  /// Grieve", NumberPredicateBuilder.java); Microsoft's server widens by
+  /// half a unit of the last DECIMAL place (read from a comment here, not
+  /// verified). Neither follows the text for eq/ne, so the text is what is
+  /// implemented there. For gt/lt see the case below: HAPI and Firely
+  /// agree with each other and with this file's date path.
   Expression<bool> _numericPrefixCondition(
     GeneratedColumn<double> lowColumn,
     GeneratedColumn<double> highColumn,
@@ -5010,10 +5012,27 @@ class FhirDao<R extends FhirNode, T extends Object>
         lowColumn.isSmallerThanValue(high) &
         highColumn.isSmallerOrEqualValue(high);
     switch (prefix) {
+      // `gt` and `lt` compare against the SEARCH VALUE'S RANGE, not the
+      // value as written. R4B 3.1.1.4.5, verbatim: gt is "the range above
+      // the search value intersects (i.e. overlaps) with the range of the
+      // target value". The sentence carries two readings — above the value
+      // (70, infinity), or above its range [70.5, infinity) — and this
+      // code took the first until 2026-09-21, alone:
+      //
+      //   HAPI 8.13.9, over 50 resources loaded into both servers:
+      //     `value-quantity=gt70` excludes a stored 70, `ge70` includes it.
+      //   Firely Server 6.9.1 (server.fire.ly, read-only probes on its own
+      //     data, three Observations, `_id` pinned): the same, at 120
+      //     mm[Hg], 16 /min and 98 %.
+      //   `_dateRangeCondition` in this file: the same, for dates.
+      //
+      // Under the first reading `ge` added nothing at a value equal to the
+      // search value, since `gt` already matched it. Confirmation asked of
+      // HL7 (fhirant tool/differential/OPEN-QUESTION-gt-lt-ranges.md).
       case 'gt':
-        return highColumn.isBiggerThanValue(value);
+        return highColumn.isBiggerThanValue(high);
       case 'lt':
-        return lowColumn.isSmallerThanValue(value);
+        return lowColumn.isSmallerThanValue(low);
       case 'ge':
         return highColumn.isBiggerOrEqualValue(value) &
             (highColumn.isBiggerThanValue(value) |
