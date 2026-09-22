@@ -1,5 +1,6 @@
-// ignore_for_file: lines_longer_than_80_chars, avoid_print
+// ignore_for_file: lines_longer_than_80_chars
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:drift/drift.dart';
@@ -367,8 +368,10 @@ class FhirDao<R extends FhirNode, T extends Object>
       }
 
       return true;
-    } catch (e) {
-      print('Error in saveResources: $e');
+    } on Exception catch (e) {
+      // A store failure (SQLite, drift) is the false this method promises;
+      // an Error is a defect and propagates.
+      stderr.writeln('Error in saveResources: $e');
       return false;
     }
   }

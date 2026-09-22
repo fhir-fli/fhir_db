@@ -91,7 +91,7 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
     for (final row in rows) {
       try {
         registry.add(model.fromJson(row.resource));
-      } catch (e) {
+      } on Object catch (e) {
         // Stored before validation existed, or under a model that had no
         // engine: kept in the store, indexed by nothing, and named here so
         // a server can say so.
@@ -632,7 +632,8 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
     R resource;
     try {
       resource = model.fromJson(json);
-    } catch (_) {
+    } on Object catch (_) {
+      // Whatever the model's parser throws for a row it cannot read.
       return;
     }
     // The same extractor `FhirDao.saveResource` indexes with: the
