@@ -72,9 +72,18 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
 
   Future<CustomSearchParameters?> _loadCustomSearchParameters() async {
     final engine = model.createFhirPathEngine(
-      IndexHostServices(
-        (type, id) => model.fromJson('{"resourceType":"$type","id":"$id"}'),
-      ),
+      IndexHostServices((type, id) {
+        try {
+          return model.fromJson('{"resourceType":"$type","id":"$id"}');
+        } on Object catch (e) {
+          // A type whose constructor requires more than an id (Group needs
+          // type and actual) cannot be stubbed from a reference string. The
+          // engine turns a host Exception into an empty resolve(); the
+          // model's null-check Error would have been a crash. Found
+          // 2026-09-23 when the engine stopped swallowing Errors.
+          throw FormatException('cannot stub $type/$id for resolve(): $e');
+        }
+      }),
     );
     if (engine == null) {
       return _customLoaded = null;

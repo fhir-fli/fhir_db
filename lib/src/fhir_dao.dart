@@ -368,9 +368,11 @@ class FhirDao<R extends FhirNode, T extends Object>
       }
 
       return true;
-    } on Exception catch (e) {
-      // A store failure (SQLite, drift) is the false this method promises;
-      // an Error is a defect and propagates.
+    } on Object catch (e) {
+      // Any failure inside the batch, a store error or an index extractor
+      // that throws, is the false this method promises and the transaction
+      // rolls back (indexing_failure_test, review_integrity_test); the
+      // singular saveResource throws instead.
       stderr.writeln('Error in saveResources: $e');
       return false;
     }
