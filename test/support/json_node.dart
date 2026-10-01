@@ -268,6 +268,12 @@ class JsonModel extends FhirModel<JsonNode, String> {
           '_tag': SearchParameterDefinition('token', []),
           '_profile': SearchParameterDefinition('uri', []),
           '_security': SearchParameterDefinition('token', []),
+          // Typed as the R4B definitions type them (fhir_r4_db
+          // search_parameter_types.dart: `_text`, `_content`, `_list` are
+          // 'string').
+          '_text': SearchParameterDefinition('string', []),
+          '_content': SearchParameterDefinition('string', []),
+          '_list': SearchParameterDefinition('string', []),
         },
         'Patient': {
           'name': SearchParameterDefinition('string', []),

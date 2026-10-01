@@ -1022,8 +1022,10 @@ class FhirDao<R extends FhirNode, T extends Object>
     //
     // A sort on this path still reads every match, because the page cannot
     // be chosen until the resources are ordered. This path is reached only
-    // for a search the SQL-paged path refuses (a modifier, a chain, `_has`,
-    // a comma, a repeated parameter); a plain sorted search is paged in SQL.
+    // for the two shapes the SQL path does not yet express: a token
+    // `:of-type` and an id list longer than [maxIdListInSql]. Everything
+    // else — modifiers, chains, `_has`, commas, repeats, sorts — is paged
+    // in SQL (test/one_search_path_test.dart).
     final ordered = matchingIds.toList()..sort();
 
     if (sort != null && sort.isNotEmpty) {
@@ -1097,14 +1099,51 @@ class FhirDao<R extends FhirNode, T extends Object>
     CompartmentScope? compartment,
     Set<String>? only,
   }) async {
-    if (count != null && count <= 0) return null;
-
-    final sortKeys = <_SortKey>[];
-    for (final rule in sort ?? const <String>[]) {
-      final key = _sortKeyFor(resourceType, rule);
-      if (key == null) return null;
-      sortKeys.add(key);
+    try {
+      return await _pagedIdsInSql(
+        resourceType,
+        searchParameters,
+        hasParameters,
+        sort,
+        count,
+        offset,
+        countOnly: countOnly,
+        compartment: compartment,
+        only: only,
+      );
+    } on _NotInSql {
+      return null;
     }
+  }
+
+  Future<List<String>?> _pagedIdsInSql(
+    String resourceType,
+    Map<String, List<String>>? searchParameters,
+    List<HasParameter>? hasParameters,
+    List<String>? sort,
+    int? count,
+    int? offset, {
+    bool countOnly = false,
+    CompartmentScope? compartment,
+    Set<String>? only,
+  }) async {
+    // 3.1.1.5.3 (R4B search.html, read whole 2026-10-01, verbatim): "if _count has the
+    // value 0 ... the server returns a bundle that reports the total ...
+    // but with no entries". The set path cut the page with `count > 0` as
+    // its only test, so 0 returned EVERY match (fhirant answered it with a
+    // count first, hiding this).
+    if (count != null && count <= 0) return const [];
+
+    // 3.1.1.5.1 (R4B search.html, read whole 2026-10-01, verbatim): "Each item in the
+    // comma separated list is a search parameter". A rule that names none,
+    // or one whose type has no single value to order by (composite,
+    // special), orders nothing and is dropped; the rules after it still
+    // apply. fhirant refuses an unknown rule under `Prefer:
+    // handling=strict` before the search reaches here.
+    final sortKeys = <_SortKey>[
+      for (final rule in sort ?? const <String>[])
+        if (_sortKeyFor(resourceType, rule) case final key?) key,
+    ];
 
     final parts = <_IndexCondition>[];
     var aliases = 0;
@@ -1152,7 +1191,12 @@ class FhirDao<R extends FhirNode, T extends Object>
             aliasName: aliasName,
             nextAlias: nextAlias,
           );
-          if (one == null) return null;
+          // Null is a chain whose last link no type defines: an unknown
+          // parameter, ignored (3.1.1.3; see _chainCondition).
+          if (one == null) {
+            combined = null;
+            break;
+          }
           combined = combined == null
               ? one
               : _IndexCondition(
@@ -1163,7 +1207,7 @@ class FhirDao<R extends FhirNode, T extends Object>
                   ranged: combined.ranged || one.ranged,
                 );
         }
-        parts.add(combined!);
+        if (combined != null) parts.add(combined);
       }
     }
 
@@ -1177,7 +1221,6 @@ class FhirDao<R extends FhirNode, T extends Object>
         aliasName: nextAlias(),
         nextAlias: nextAlias,
       );
-      if (part == null) return null;
       parts.add(part);
     }
 
@@ -1941,6 +1984,11 @@ class FhirDao<R extends FhirNode, T extends Object>
     // `_tag`, `_profile`, `_security`, `_source`, `_id`, `_lastUpdated` are
     // published against Resource (R4B 3.1.1.4.1), not against each type.
     final declared = lookupDefinition(resourceType, key.name);
+    // 3.1.1.3 (R4B search.html, read whole 2026-10-01, verbatim): "servers SHOULD ignore
+    // unknown or unsupported parameters". The top-level loop skips one
+    // before reaching here; inside a `_has` (3.1.1.4.16) ignoring it
+    // leaves the reference itself as the whole condition, which is what
+    // [_hasCondition] does with this null.
     if (declared == null) return null;
     // 3.1.1.4.4, a SHALL: a modifier the type does not allow, or one this
     // package does not implement, is refused rather than answered wrongly.
@@ -1977,6 +2025,23 @@ class FhirDao<R extends FhirNode, T extends Object>
     }
   }
 
+  /// Refuses [modifier] on [name]: 3.1.1.4.4 (cited on
+  /// [UnsupportedSearchModifier]) is a SHALL, and a modifier this builder
+  /// has no meaning for is one "the server does not support for that
+  /// parameter", whatever the type's general list allows.
+  Never _refuseModifier(
+    String name,
+    String modifier,
+    String type, {
+    Set<String> allowed = const {},
+  }) =>
+      throw UnsupportedSearchModifier(
+        parameter: name,
+        modifier: modifier,
+        type: type,
+        allowed: allowed,
+      );
+
   /// The value of `:missing`, lower-cased: `true` or `false`, and nothing
   /// else. R4B search.html 3.1.1.4.4, read whole 2026-09-18: ":missing;
   /// e.g. gender:missing=true (or false)". Any other value used to be read
@@ -2001,7 +2066,14 @@ class FhirDao<R extends FhirNode, T extends Object>
     required String Function() nextAlias,
   }) async {
     if (key.chain != null) {
-      if (declared.type != 'reference') return null;
+      // 3.1.1.4.15 (R4B search.html, read whole 2026-10-01, verbatim): "reference
+      // parameters may be chained". A chain hung on any other type follows
+      // nothing, so nothing is reached through it (3.1.1.3, a logical
+      // condition: an empty result, not an error).
+      if (declared.type != 'reference') {
+        final r = aliasName == null ? resources : alias(resources, aliasName);
+        return _IndexCondition(r, r.id, const Constant(false));
+      }
       return _chainCondition(
         resourceType,
         key.name,
@@ -2058,6 +2130,11 @@ class FhirDao<R extends FhirNode, T extends Object>
                   lookupDefinition(type, chainedKey.name) != null)
                 type,
           ];
+    // No target type defines the chained parameter: it is unknown, and
+    // 3.1.1.3 (cited above) ignores an unknown parameter. The set path
+    // searched every target with it, which matched every target, so the
+    // answer became "has any reference" — a condition the client did not
+    // write.
     if (candidates.isEmpty) return null;
     Expression<bool>? any;
     for (final target in candidates) {
@@ -2078,11 +2155,15 @@ class FhirDao<R extends FhirNode, T extends Object>
           aliasName: nextAlias(),
           nextAlias: nextAlias,
         );
-        // A candidate this path cannot express sends the whole search down
-        // the general path rather than quietly leaving that type out.
-        if (inner == null) return null;
-        final hop = c.referenceResourceType.equals(rowType) &
-            await _nest(inner, c.referenceIdPart);
+        // The chained key is defined on this candidate (checked above), so
+        // a null here is a deeper chain whose last link is unknown
+        // everywhere: ignored, as any unknown parameter (3.1.1.3, cited
+        // above), which leaves the hop as "references some resource of
+        // this type".
+        final hop = inner == null
+            ? c.referenceResourceType.equals(rowType)
+            : c.referenceResourceType.equals(rowType) &
+                await _nest(inner, c.referenceIdPart);
         any = any == null ? hop : any | hop;
       }
     }
@@ -2124,14 +2205,18 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// id column is the REFERENCED id, which is what makes it combine with the
   /// other conditions on the source. The general path ignored the reference
   /// parameter and accepted any reference from the target type to the source.
-  Future<_IndexCondition?> _hasCondition(
+  Future<_IndexCondition> _hasCondition(
     String resourceType,
     HasParameter has, {
     required String aliasName,
     required String Function() nextAlias,
   }) async {
-    if (!model.resourceTypeNames.contains(has.targetType)) return null;
     final h = alias(referenceSearchParameters, aliasName);
+    // A type this store has no definition for has no resources, so nothing
+    // refers to anything through it: empty, as the set path answered it.
+    if (!model.resourceTypeNames.contains(has.targetType)) {
+      return _IndexCondition(h, h.referenceIdPart, const Constant(false));
+    }
     final target = has.targetType;
     final refName = has.referenceParam;
     final path = h.resourceType.equals(target) &
@@ -2162,7 +2247,11 @@ class FhirDao<R extends FhirNode, T extends Object>
           aliasName: aliasForAll,
           nextAlias: nextAlias,
         );
-        if (one == null) return null;
+        // An unknown parameter: ignored (see below), whatever its values.
+        if (one == null) {
+          combined = null;
+          break;
+        }
         combined = combined == null
             ? one
             : _IndexCondition(
@@ -2175,11 +2264,14 @@ class FhirDao<R extends FhirNode, T extends Object>
       }
       inner = combined;
     }
-    if (inner == null) return null;
+    // A null inner is an unknown search parameter (or a nested `_has` that
+    // ended in one), ignored per 3.1.1.3 (cited in _conditionForKey); what
+    // remains is "referred to by at least one [target] through [refName]"
+    // (3.1.1.4.16).
     return _IndexCondition(
       h,
       h.referenceIdPart,
-      path & await _nest(inner, h.id),
+      inner == null ? path : path & await _nest(inner, h.id),
     );
   }
 
@@ -2200,9 +2292,13 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// - reference: `:identifier` on `Reference.identifier`; a resource type
   ///   as the modifier (`subject:Patient=23`) "has the same effect as
   ///   subject=Patient/23" (§3.1.1.4.12).
-  /// - uri: `:below` is prefix; `:above` is not built (it needs the stored
-  ///   value as the prefix of the search value, which the general path does
-  ///   in Dart).
+  /// - uri: `:below` is prefix; `:above` is the stored value as a prefix
+  ///   of the search value (instr).
+  ///
+  /// A modifier the type's rules allow but no branch here gives a meaning
+  /// (`_id:not`, `_list:exact`, `_content:contains`, a type modifier that
+  /// names no type) is refused through [_refuseModifier], never answered
+  /// as something else.
   Future<_IndexCondition?> _conditionFor(
     String resourceType,
     String name,
@@ -2225,7 +2321,10 @@ class FhirDao<R extends FhirNode, T extends Object>
     // system can support"), and answering it with everything would be
     // wrong, so it is refused.
     if (name == '_list') {
-      if (modifier != null) return null;
+      // 3.1.1.4.22 defines no modifier for `_list`; its string typing in
+      // the published definition is the value's shape, not a licence for
+      // `:exact` on a list id.
+      if (modifier != null) _refuseModifier(name, modifier, 'list');
       final listId = unescapeValue(value);
       if (listId.startsWith(r'$')) {
         throw InvalidSearchValue(parameter: name, value: value, type: 'list');
@@ -2257,7 +2356,9 @@ class FhirDao<R extends FhirNode, T extends Object>
     // the value's own words are ANDed. It used to be ignored, which
     // answered `_content=metastases` with every resource.
     if (name == '_content') {
-      if (modifier != null) return null;
+      // 3.1.1.4.20 defines no modifier for `_content`, and the stored JSON
+      // has no "exact" or "missing" reading.
+      if (modifier != null) _refuseModifier(name, modifier, 'content');
       final r = aliasName == null ? resources : alias(resources, aliasName);
       var where = r.resourceType.equals(resourceType);
       final words =
@@ -2280,8 +2381,10 @@ class FhirDao<R extends FhirNode, T extends Object>
     // The narrative's text is indexed as a string row (`Resource.text.div`,
     // tags stripped, folded like any string), and every word of the value
     // must appear in it. The same plain reading as `_content`.
-    if (name == '_text') {
-      if (modifier != null) return null;
+    // With a string modifier (`:exact`, `:contains`, `:missing`) the
+    // narrative row is searched as any string row is, by the string
+    // builder below; the plain form is the every-word match here.
+    if (name == '_text' && modifier == null) {
       final t = aliasName == null
           ? stringSearchParameters
           : alias(stringSearchParameters, aliasName);
@@ -2297,11 +2400,22 @@ class FhirDao<R extends FhirNode, T extends Object>
     }
 
     // `_id` and `_lastUpdated` are columns of the resources table, not
-    // index rows. `_id:missing` and `_lastUpdated:missing` are meaningless
-    // (every resource has both) and take the general path.
+    // index rows. Every resource has both, so `:missing=true` is nothing
+    // and `:missing=false` is the type. No other modifier has a meaning on
+    // a column (`_id:not`, `_id:text`): the set path answered `_id:not=x`
+    // with x itself.
     if (name == '_id' || name == '_lastUpdated') {
-      if (modifier != null) return null;
       final r = aliasName == null ? resources : alias(resources, aliasName);
+      if (modifier == 'missing') {
+        return _IndexCondition(
+          r,
+          r.id,
+          r.resourceType.equals(resourceType) & Constant<bool>(value != 'true'),
+        );
+      }
+      if (modifier != null) {
+        _refuseModifier(name, modifier, declared.type, allowed: {'missing'});
+      }
       final Expression<bool>? condition;
       Expression<bool>? walkCondition;
       if (name == '_id') {
@@ -2434,7 +2548,10 @@ class FhirDao<R extends FhirNode, T extends Object>
               negated: modifier == 'not-in',
             );
           default:
-            return null;
+            // `:of-type` (3.1.1.4.10) needs Identifier.type, which the
+            // index does not yet hold; the set path reads resources for
+            // it. The one shape still answered outside SQL.
+            throw const _NotInSql();
         }
       case 'reference':
         final t = aliasName == null
@@ -2482,9 +2599,38 @@ class FhirDao<R extends FhirNode, T extends Object>
                       t.referenceValue.substr(1, prefix.length).equals(prefix)),
             );
           default:
-            // A resource type: `subject:Patient=23` is `subject=Patient/23`.
-            if (!model.resourceTypeNames.contains(modifier)) return null;
-            if (value.contains('/')) return null;
+            // A resource type, 3.1.1.4.12 (R4B search.html, read whole 2026-10-01, verbatim):
+            // `subject:Patient=23` "has the same effect as" `subject=
+            // Patient/23`. A word written like one that names no type is a
+            // modifier this server does not support (3.1.1.4.4).
+            if (!model.resourceTypeNames.contains(modifier)) {
+              _refuseModifier(
+                name,
+                modifier,
+                'reference',
+                allowed: model.modifierRules.allowedFor('reference'),
+              );
+            }
+            // A value that already carries a type either agrees with the
+            // modifier, and is that search, or contradicts it, and nothing
+            // satisfies both (3.1.1.3, a logical condition: empty).
+            // An absolute URL is unambiguous on its own (3.1.1.4.12:
+            // "since these are absolute references, there can be no
+            // ambiguity about the type") and is searched as written.
+            final typed = unescapeValue(value);
+            if (typed.contains('/')) {
+              final parts = typed.split('/');
+              if (!typed.contains('://') &&
+                  parts.length == 2 &&
+                  parts.first != modifier) {
+                return _IndexCondition(t, t.id, const Constant(false));
+              }
+              return _IndexCondition(
+                t,
+                t.id,
+                _referenceCondition(resourceType, name, typed, on: t),
+              );
+            }
             return _IndexCondition(
               t,
               t.id,
@@ -2504,7 +2650,9 @@ class FhirDao<R extends FhirNode, T extends Object>
           final path = onPath(t.resourceType, t.searchName);
           return _IndexCondition(t, t.id, path, negated: value == 'true');
         }
-        if (modifier != null) return null;
+        if (modifier != null) {
+          _refuseModifier(name, modifier, 'number', allowed: {'missing'});
+        }
         final (prefix, rest) = splitComparator(declared, value);
         final condition =
             _numberCondition(resourceType, name, prefix, rest, on: t);
@@ -2539,7 +2687,9 @@ class FhirDao<R extends FhirNode, T extends Object>
           final path = onPath(t.resourceType, t.searchName);
           return _IndexCondition(t, t.id, path, negated: value == 'true');
         }
-        if (modifier != null) return null;
+        if (modifier != null) {
+          _refuseModifier(name, modifier, 'quantity', allowed: {'missing'});
+        }
         final (prefix, rest) = splitComparator(declared, value);
         final condition =
             _quantityCondition(resourceType, name, prefix, rest, on: t);
@@ -2600,7 +2750,12 @@ class FhirDao<R extends FhirNode, T extends Object>
                   ).equals(1);
             return _IndexCondition(t, t.id, path & prefix);
           default:
-            return null;
+            _refuseModifier(
+              name,
+              modifier,
+              'uri',
+              allowed: model.modifierRules.allowedFor('uri'),
+            );
         }
       case 'string':
         final t = aliasName == null
@@ -2638,7 +2793,12 @@ class FhirDao<R extends FhirNode, T extends Object>
               path & t.stringValue.like('%$normalized%'),
             );
           default:
-            return null;
+            _refuseModifier(
+              name,
+              modifier,
+              'string',
+              allowed: model.modifierRules.allowedFor('string'),
+            );
         }
       case 'date':
         final t = aliasName == null
@@ -2648,7 +2808,9 @@ class FhirDao<R extends FhirNode, T extends Object>
           final path = onPath(t.resourceType, t.searchName);
           return _IndexCondition(t, t.id, path, negated: value == 'true');
         }
-        if (modifier != null) return null;
+        if (modifier != null) {
+          _refuseModifier(name, modifier, 'date', allowed: {'missing'});
+        }
         final (prefix, rest) = splitComparator(declared, value);
         final condition =
             _dateCondition(resourceType, name, prefix, rest, on: t);
@@ -2666,7 +2828,14 @@ class FhirDao<R extends FhirNode, T extends Object>
         // 3.1.1.4.21: "the general modifiers and comparators do not apply,
         // except as stated in the description". The one special parameter
         // this package answers is Location's `near`.
-        if (modifier != null || name != 'near') return null;
+        if (modifier != null) _refuseModifier(name, modifier, 'special');
+        if (name != 'near') {
+          // The only other special parameter R4B lists is `_filter`
+          // (3.1.1.4.21), which fhirant evaluates itself; a custom one has
+          // no rows here. Empty, as the set path answered it.
+          final r = aliasName == null ? resources : alias(resources, aliasName);
+          return _IndexCondition(r, r.id, const Constant(false));
+        }
         final t = aliasName == null
             ? specialSearchParameters
             : alias(specialSearchParameters, aliasName);
@@ -2677,7 +2846,7 @@ class FhirDao<R extends FhirNode, T extends Object>
         );
       case 'composite':
         // 3.1.1.4.17: "Modifiers are not used on composite parameters."
-        if (modifier != null) return null;
+        if (modifier != null) _refuseModifier(name, modifier, 'composite');
         final t = aliasName == null
             ? compositeSearchParameters
             : alias(compositeSearchParameters, aliasName);
@@ -2687,7 +2856,10 @@ class FhirDao<R extends FhirNode, T extends Object>
           _compositeCondition(resourceType, name, value, declared, t),
         );
       default:
-        return null;
+        // A search type no table holds (a custom definition's typo): no
+        // row was ever written for it, so nothing matches.
+        final r = aliasName == null ? resources : alias(resources, aliasName);
+        return _IndexCondition(r, r.id, const Constant(false));
     }
   }
 
@@ -5952,4 +6124,10 @@ class HistoryEntry<R extends FhirNode> {
 
   /// The resource at this version; null when [deleted].
   final R? resource;
+}
+
+/// A search shape the SQL builders cannot yet express, answered by the set
+/// path instead. Thrown deep in a builder and caught by [FhirDao._pagedIds].
+class _NotInSql implements Exception {
+  const _NotInSql();
 }
