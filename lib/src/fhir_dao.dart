@@ -1033,11 +1033,9 @@ class FhirDao<R extends FhirNode, T extends Object>
     // for a caller that walks the pages.
     //
     // A sort on this path still reads every match, because the page cannot
-    // be chosen until the resources are ordered. This path is reached only
-    // for the two shapes the SQL path does not yet express: a token
-    // `:of-type` and an id list longer than [maxIdListInSql]. Everything
-    // else — modifiers, chains, `_has`, commas, repeats, sorts — is paged
-    // in SQL (test/one_search_path_test.dart).
+    // be chosen until the resources are ordered. Every shape is paged in
+    // SQL now (test/one_search_path_test.dart); this path is unreachable
+    // and is deleted in ST4 step 4.
     final ordered = matchingIds.toList()..sort();
 
     if (sort != null && sort.isNotEmpty) {
@@ -1101,34 +1099,6 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// MIN/MAX; see [_sortKeyFor]. A search with no parameter at all selects
   /// from the resources table.
   Future<List<String>?> _pagedIds(
-    String resourceType,
-    Map<String, List<String>>? searchParameters,
-    List<HasParameter>? hasParameters,
-    List<String>? sort,
-    int? count,
-    int? offset, {
-    bool countOnly = false,
-    CompartmentScope? compartment,
-    Set<String>? only,
-  }) async {
-    try {
-      return await _pagedIdsInSql(
-        resourceType,
-        searchParameters,
-        hasParameters,
-        sort,
-        count,
-        offset,
-        countOnly: countOnly,
-        compartment: compartment,
-        only: only,
-      );
-    } on _NotInSql {
-      return null;
-    }
-  }
-
-  Future<List<String>?> _pagedIdsInSql(
     String resourceType,
     Map<String, List<String>>? searchParameters,
     List<HasParameter>? hasParameters,
@@ -2312,9 +2282,8 @@ class FhirDao<R extends FhirNode, T extends Object>
   ///   normalized value.
   /// - token: `:text` on the display; `:not` is the plain match, negated;
   ///   `:in` is an OR over the ValueSet's codes and `:not-in` that, negated
-  ///   (`:not-in` with an empty expansion excludes nothing). `:of-type` is
-  ///   not built: the index has no identifier type and the general path
-  ///   reads resources for it.
+  ///   (`:not-in` with an empty expansion excludes nothing); `:of-type`
+  ///   on the `<name>:of-type` rows the indexer writes per type coding.
   /// - reference: `:identifier` on `Reference.identifier`; a resource type
   ///   as the modifier (`subject:Patient=23`) "has the same effect as
   ///   subject=Patient/23" (§3.1.1.4.12).
@@ -2573,11 +2542,43 @@ class FhirDao<R extends FhirNode, T extends Object>
               any!,
               negated: modifier == 'not-in',
             );
+          case 'of-type':
+            // 3.1.1.4.10 (R4B search.html, read whole 2026-10-01):
+            // "system|code|value, where the system and code refer to a
+            // Identifier.type.coding.system and .code, and match if any
+            // of the type codes match. All 3 parts must be present". The
+            // indexer writes one `<name>:of-type` row per type coding,
+            // system = the coding's system, value = `code|value`
+            // (SearchIndexer.tokenRows). An empty system part is read as
+            // the plain token form reads `|code`: a coding with no system.
+            final parts = splitEscaped(value, '|');
+            if (parts.length != 3) {
+              throw InvalidSearchValue(
+                parameter: '$name:of-type',
+                value: value,
+                type: 'token',
+              );
+            }
+            final [typeSystem, typeCode, identifierValue] = parts;
+            return _IndexCondition(
+              t,
+              t.id,
+              t.resourceType.equals(resourceType) &
+                  t.searchName.equals('$name:of-type') &
+                  (typeSystem.isEmpty
+                      ? t.tokenSystem.isNull()
+                      : t.tokenSystem.equals(typeSystem)) &
+                  t.tokenValue.equals('$typeCode|$identifierValue'),
+            );
           default:
-            // `:of-type` (3.1.1.4.10) needs Identifier.type, which the
-            // index does not yet hold; the set path reads resources for
-            // it. The one shape still answered outside SQL.
-            throw const _NotInSql();
+            // Every modifier the token rules allow has a branch above; one
+            // reaching here is a rule the builders do not implement.
+            _refuseModifier(
+              name,
+              modifier,
+              'token',
+              allowed: model.modifierRules.allowedFor('token'),
+            );
         }
       case 'reference':
         final t = aliasName == null
@@ -6150,10 +6151,4 @@ class HistoryEntry<R extends FhirNode> {
 
   /// The resource at this version; null when [deleted].
   final R? resource;
-}
-
-/// A search shape the SQL builders cannot yet express, answered by the set
-/// path instead. Thrown deep in a builder and caught by [FhirDao._pagedIds].
-class _NotInSql implements Exception {
-  const _NotInSql();
 }

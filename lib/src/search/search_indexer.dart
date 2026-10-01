@@ -140,13 +140,37 @@ class SearchIndexer {
       case 'Identifier':
         final code = value.childValue('value');
         if (code == null) return const [];
+        final type = value.child('type');
         return [
           row(
             code: code,
             system: value.childValue('system'),
             // R4B 3.1.1.4.10: `:text` searches "Identifier.type.text".
-            display: value.child('type')?.childValue('text'),
+            display: type?.childValue('text'),
           ),
+          // `:of-type` (R4B search.html 3.1.1.4.10, read whole 2026-10-01):
+          // "system|code|value, where the system and code refer to a
+          // Identifier.type.coding.system and .code, and match if any of
+          // the type codes match". One extra row per type coding, laid out
+          // as HAPI lays it (BaseSearchParamExtractor.addToken_Identifier,
+          // read 2026-10-01): named `<param>:of-type`, system = the type
+          // coding's system, value = `<type code>|<identifier value>`. The
+          // name keeps these rows out of the plain `identifier` search.
+          if (type != null)
+            for (final coding in type.children('coding'))
+              if (coding.childValue('code') case final typeCode?)
+                TokenSearchParametersCompanion(
+                  resourceType: Value(resourceType),
+                  id: Value(id),
+                  lastUpdated: Value(lastUpdated),
+                  searchName: Value('$searchName:of-type'),
+                  paramIndex: indexValue(paramIndex),
+                  tokenSystem: switch (coding.childValue('system')) {
+                    final s? => Value(s),
+                    null => const Value.absent(),
+                  },
+                  tokenValue: Value('$typeCode|$code'),
+                ),
         ];
       case 'boolean' || 'string' || 'markdown' || 'id':
         final code = value.primitiveValue;

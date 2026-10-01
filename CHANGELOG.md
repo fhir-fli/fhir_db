@@ -32,8 +32,17 @@
   (ST4, step 2 of 4). Past 500 values the list is one literal JSON array
   read with `json_each` (SQLite ≥ 3.38.0), not one bound `id = ?` per
   value; 40,000 ids answer in well under a second where the bound form
-  overflowed the stack. The set path is now reached only for a token
-  `:of-type`.
+  overflowed the stack.
+- **`identifier:of-type` is indexed and searched in SQL** (ST4, step 3 of
+  4). The indexer writes one token row named `<param>:of-type` per
+  `Identifier.type.coding` (system = the coding's system, value =
+  `<type code>|<identifier value>`, HAPI's layout), and the search is a
+  plain equality on those rows. R4B search.html 3.1.1.4.10: "All 3 parts
+  must be present" — two parts is `InvalidSearchValue`. **Schema 15**:
+  the upgrade re-extracts the search index so stored resources get their
+  rows; a subclass with its own migration (fhirant_db) adds the same
+  rebuild at its next version. The Dart set path is now reached by no
+  search shape at all; step 4 deletes it.
 
 ## [0.14.0]
 

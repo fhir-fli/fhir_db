@@ -481,7 +481,7 @@ void main() {
     );
   });
 
-  test('the schema is at version 14 and the index rebuild runs', () async {
+  test('the schema is at version 15 and the index rebuild runs', () async {
     await dao.saveResource(patient('a'));
     await db.rebuildSearchIndex();
     expect(
@@ -491,6 +491,6 @@ void main() {
       ['a'],
     );
     final version = await db.customSelect('PRAGMA user_version').getSingle();
-    expect(version.read<int>('user_version'), 14);
+    expect(version.read<int>('user_version'), 15);
   });
 }

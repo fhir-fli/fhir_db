@@ -330,4 +330,67 @@ void main() {
       {'p2', 'p3'},
     );
   });
+
+  test('identifier:of-type is answered from its own index rows, in SQL',
+      () async {
+    // 3.1.1.4.10: "system|code|value ... match if any of the type codes
+    // match. All 3 parts must be present". The set path read every
+    // candidate resource to look at its identifier types.
+    await dao.saveResource(
+      JsonNode.resource({
+        'resourceType': 'Patient',
+        'id': 'typed',
+        'identifier': [
+          {
+            'system': 'urn:mrn',
+            'value': '446053',
+            'type': {
+              'coding': [
+                {
+                  'system': 'http://terminology.hl7.org/CodeSystem/v2-0203',
+                  'code': 'MR',
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+    const v2 = 'http://terminology.hl7.org/CodeSystem/v2-0203';
+    expect(
+      await ids('Patient', {
+        'identifier:of-type': ['$v2|MR|446053'],
+      }),
+      ['typed'],
+    );
+    expect(dao.lastSearchPagedInSql, isTrue);
+    expect(
+      await ids('Patient', {
+        'identifier:of-type': ['$v2|SS|446053'],
+      }),
+      isEmpty,
+    );
+    expect(dao.lastSearchPagedInSql, isTrue);
+    // The value alone still answers the plain search, and the of-type rows
+    // do not leak into it.
+    expect(
+      await ids('Patient', {
+        'identifier': ['446053'],
+      }),
+      ['typed'],
+    );
+    expect(
+      await ids('Patient', {
+        'identifier': ['MR|446053'],
+      }),
+      isEmpty,
+    );
+    // Two parts is not the form.
+    expect(
+      () => ids('Patient', {
+        'identifier:of-type': ['MR|446053'],
+      }),
+      throwsA(isA<InvalidSearchValue>()),
+    );
+  });
 }
