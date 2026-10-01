@@ -6,8 +6,9 @@ import 'support/json_node.dart';
 
 /// Every search shape is answered by the one SQL path (fhirant
 /// REVIEW-2026-09-17 ST4). Each case here used to make `_pagedIds` return
-/// null and fall to the Dart set path, which read every matching id into
-/// memory; `lastSearchPagedInSql` is the proof that it no longer does.
+/// null and fall to a Dart set path, which read every matching id into
+/// memory. That path is deleted (step 4, 2026-10-01), so the proof is now
+/// structural: there is nothing else a search can run on.
 ///
 /// The sections cited are R4B search.html, read whole 2026-10-01.
 void main() {
@@ -71,7 +72,6 @@ void main() {
     // reports the total ... but with no entries". The set path paged with
     // `count > 0` as the only cut, so count 0 returned EVERY match.
     expect(await ids('Patient', {}, count: 0), isEmpty);
-    expect(dao.lastSearchPagedInSql, isTrue);
   });
 
   test('_id:missing and _lastUpdated:missing are answered in SQL', () async {
@@ -83,21 +83,18 @@ void main() {
       }),
       isEmpty,
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
     expect(
       await ids('Patient', {
         '_id:missing': ['false'],
       }),
       ['p1', 'p2', 'p3'],
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
     expect(
       await ids('Patient', {
         '_lastUpdated:missing': ['true'],
       }),
       isEmpty,
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
   });
 
   test('_id takes no modifier but :missing', () async {
@@ -122,7 +119,6 @@ void main() {
       }),
       isEmpty,
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
   });
 
   test('a chained parameter no target type defines is ignored', () async {
@@ -137,7 +133,6 @@ void main() {
       }),
       ['o1', 'o2', 'o3'],
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
   });
 
   test('_has with an unknown search parameter keeps only the reference',
@@ -153,7 +148,6 @@ void main() {
       ),
       ['p1', 'p2'],
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
   });
 
   test('_has naming a type this store has no definition for is empty',
@@ -166,7 +160,6 @@ void main() {
       ),
       isEmpty,
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
   });
 
   test('a _sort rule that names no orderable parameter is dropped', () async {
@@ -175,17 +168,14 @@ void main() {
     // to order by (a composite, a special), orders nothing; the rules
     // after it still apply.
     expect(await ids('Patient', {}, sort: ['nonsense']), ['p1', 'p2', 'p3']);
-    expect(dao.lastSearchPagedInSql, isTrue);
     expect(
       await ids('Patient', {}, sort: ['nonsense', '-family']),
       ['p3', 'p2', 'p1'],
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
     expect(
       await ids('Observation', {}, sort: ['code-value-quantity']),
       ['o1', 'o2', 'o3'],
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
   });
 
   test('a reference type modifier that names no resource type is refused',
@@ -213,14 +203,12 @@ void main() {
       }),
       ['o1'],
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
     expect(
       await ids('Observation', {
         'subject:Patient': ['Encounter/p1'],
       }),
       isEmpty,
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
   });
 
   test('_list and _content take no modifier; _text takes the string ones',
@@ -244,14 +232,12 @@ void main() {
       }),
       ['p1', 'p2', 'p3'],
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
     expect(
       await ids('Patient', {
         '_text:exact': ['anything'],
       }),
       isEmpty,
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
   });
 
   test('an _id list of any length is one bound JSON array, in SQL', () async {
@@ -272,7 +258,6 @@ void main() {
       ['p1', 'p3'],
     );
     sw.stop();
-    expect(dao.lastSearchPagedInSql, isTrue);
     expect(sw.elapsedMilliseconds, lessThan(2000));
     // ANDed with another condition, and counted.
     expect(
@@ -282,7 +267,6 @@ void main() {
       }),
       ['p1', 'p3'],
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
     expect(
       await dao.searchCount(
         resourceType: 'Patient',
@@ -308,7 +292,6 @@ void main() {
       }),
       ["q'uo\"te"],
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
   });
 
   test('a caller id set of any length is one bound JSON array, in SQL',
@@ -324,7 +307,6 @@ void main() {
       count: 20,
     );
     expect(page.map((r) => r.resourceId), ['p3']);
-    expect(dao.lastSearchPagedInSql, isTrue);
     expect(
       await dao.searchIds(resourceType: 'Patient', ids: many),
       {'p2', 'p3'},
@@ -363,14 +345,12 @@ void main() {
       }),
       ['typed'],
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
     expect(
       await ids('Patient', {
         'identifier:of-type': ['$v2|SS|446053'],
       }),
       isEmpty,
     );
-    expect(dao.lastSearchPagedInSql, isTrue);
     // The value alone still answers the plain search, and the of-type rows
     // do not leak into it.
     expect(

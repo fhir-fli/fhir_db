@@ -41,8 +41,12 @@
   must be present" — two parts is `InvalidSearchValue`. **Schema 15**:
   the upgrade re-extracts the search index so stored resources get their
   rows; a subclass with its own migration (fhirant_db) adds the same
-  rebuild at its next version. The Dart set path is now reached by no
-  search shape at all; step 4 deletes it.
+  rebuild at its next version.
+- **The Dart set path is deleted** (ST4, step 4 of 4): `_matchingIds`,
+  the ten `_search*Parameter` walkers, the Dart sort and page, 1,361
+  lines. `search`, `searchIds` and `searchCount` run one SQL statement
+  each. `FhirDao.lastSearchPagedInSql`, the test-visible flag that said
+  which path ran, is gone with the second path.
 
 ## [0.14.0]
 
