@@ -920,13 +920,11 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// on the general path (false). For tests: a search that gives the right
   /// answer on either path proves nothing about which one ran.
   @visibleForTesting
-  bool lastSearchPagedInSql = false;
 
   /// The ids of every resource [searchParameters], [hasParameters] and
-  /// [compartment] match, and nothing else read. The same conditions as
-  /// [search] — one SQL statement when every part can be expressed as one,
-  /// set arithmetic otherwise — without the page or the hydration. With no
-  /// parameters, every id of the type.
+  /// [compartment] match, and nothing else read. The same statement as
+  /// [search], without the page or the hydration. With no parameters,
+  /// every id of the type.
   ///
   /// For a caller that needs the set and not the resources: fhirant's
   /// `_filter` evaluated each leaf by reading every matching resource to
@@ -938,14 +936,20 @@ class FhirDao<R extends FhirNode, T extends Object>
     List<HasParameter>? hasParameters,
     CompartmentScope? compartment,
     Set<String>? ids,
-  }) =>
-      _matchingIds(
-        resourceType: resourceType,
-        searchParameters: searchParameters ?? const {},
-        hasParameters: hasParameters,
-        compartment: compartment,
-        only: ids,
-      );
+  }) async {
+    await _ready();
+    return (await _pagedIds(
+      resourceType.toString(),
+      searchParameters,
+      hasParameters,
+      null,
+      null,
+      null,
+      compartment: compartment,
+      only: ids,
+    ))
+        .toSet();
+  }
 
   /// Above this many ids in one `_id` repetition or one caller id set, the
   /// list is sent to SQLite as ONE literal JSON array and read with
@@ -972,11 +976,16 @@ class FhirDao<R extends FhirNode, T extends Object>
 
   /// Search resources using search parameters.
   ///
+  /// One SQL statement, whatever the shape ([_pagedIds]); the page is cut
+  /// in SQLite and only its resources are read. A Dart set path that read
+  /// every matching id into memory sat beside this until 2026-10-01
+  /// (fhirant REVIEW-2026-09-17 ST4) and is gone.
+  ///
   /// [ids], when given, restricts the result to those ids, ANDed with every
   /// other condition. They are ids the caller took from this store's own
   /// index (fhirant's `_filter` result), so they are not checked for
   /// existence; a set small enough to bind is one more part of the SQL
-  /// statement, a larger one is intersected on the set path. fhirant used
+  /// statement, a larger one is one JSON array ([_idsIn]). fhirant used
   /// to join them into one comma-separated `_id` value, whose string,
   /// re-parse and existence check cost 14 of the 19.8 s of a `_filter` over
   /// 813k Observations (fhirant REVIEW-2026-09-06 row 38).
@@ -1003,48 +1012,19 @@ class FhirDao<R extends FhirNode, T extends Object>
       compartment: compartment,
       only: ids,
     );
-    lastSearchPagedInSql = paged != null;
-    if (paged != null) {
-      return _hydrate(resourceType, paged);
+    return _hydrate(resourceType, paged);
+  }
+
+  /// The requested slice of [items], given an offset and a count.
+  static List<T> _page<T>(List<T> items, int? offset, int? count) {
+    final start = (offset != null && offset > 0)
+        ? (offset > items.length ? items.length : offset)
+        : 0;
+    var end = items.length;
+    if (count != null && count > 0 && end - start > count) {
+      end = start + count;
     }
-
-    final matchingIds = await _matchingIds(
-      resourceType: resourceType,
-      searchParameters: searchParameters,
-      hasParameters: hasParameters,
-      compartment: compartment,
-      only: ids,
-    );
-
-    if (matchingIds.isEmpty) {
-      return [];
-    }
-
-    // Cut the page out of the ID set BEFORE reading any resource.
-    //
-    // This used to read every match — one query and one parse each — build the
-    // whole list in memory, and then throw away all but the page. Measured on
-    // 928,935 MIMIC resources: `Observation?status=final` with count=20 took
-    // **190.94 seconds**, because it read roughly 800,000 rows to return 20.
-    //
-    // `matchingIds` is a Set, so its iteration order is not a defined order to
-    // page over: offset 20 was not guaranteed to continue where offset 0 left
-    // off. The ids are sorted first, which makes paging stable and repeatable
-    // for a caller that walks the pages.
-    //
-    // A sort on this path still reads every match, because the page cannot
-    // be chosen until the resources are ordered. Every shape is paged in
-    // SQL now (test/one_search_path_test.dart); this path is unreachable
-    // and is deleted in ST4 step 4.
-    final ordered = matchingIds.toList()..sort();
-
-    if (sort != null && sort.isNotEmpty) {
-      final all = await _hydrate(resourceType, ordered);
-      await _sortResults(all, sort, resourceTypeString);
-      return _page(all, offset, count);
-    }
-
-    return _hydrate(resourceType, _page(ordered, offset, count));
+    return items.sublist(start, end);
   }
 
   /// The resources for [ids], in the order given, those that exist. One
@@ -1067,21 +1047,12 @@ class FhirDao<R extends FhirNode, T extends Object>
   }
 
   /// The requested slice of [items], given an offset and a count.
-  static List<T> _page<T>(List<T> items, int? offset, int? count) {
-    final start = (offset != null && offset > 0)
-        ? (offset > items.length ? items.length : offset)
-        : 0;
-    var end = items.length;
-    if (count != null && count > 0 && end - start > count) {
-      end = start + count;
-    }
-    return items.sublist(start, end);
-  }
 
-  /// The page of ids, cut in SQL, for a search made only of parameters this
-  /// path knows how to express as a typed WHERE: any number of them, each one
-  /// repetition, no modifier, no comma, no `_has`, no `_sort`. Returns null
-  /// for anything else, and the general path runs.
+  /// The page of ids, cut in SQL, for any search: every parameter type,
+  /// modifier, comma, repeat, chain, `_has`, `_sort`, compartment and id
+  /// list has its condition builder here ([_conditionFor], [_hasCondition],
+  /// [_compartmentCondition], [_idsIn]); a modifier no builder gives a
+  /// meaning is refused, never answered as something else.
   ///
   /// The first parameter is the select; each further one becomes
   /// `id IN (SELECT id FROM <its table> WHERE …)` on it through Drift's
@@ -1093,12 +1064,12 @@ class FhirDao<R extends FhirNode, T extends Object>
   ///
   /// Types covered: token, date, string, reference, number, quantity,
   /// uri. Each further type is one condition builder
-  /// added to [_conditionFor]; a search using a type not there falls through.
+  /// added to [_conditionFor].
   ///
   /// A `_sort` is paged here too, as a LEFT JOIN per key with GROUP BY and
   /// MIN/MAX; see [_sortKeyFor]. A search with no parameter at all selects
   /// from the resources table.
-  Future<List<String>?> _pagedIds(
+  Future<List<String>> _pagedIds(
     String resourceType,
     Map<String, List<String>>? searchParameters,
     List<HasParameter>? hasParameters,
@@ -3139,197 +3110,6 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// `search`.
   /// Those of [ids] that exist as a [resourceType] resource, read in
   /// `IN (...)` chunks of [maxIdListInSql].
-  Future<Set<String>> _existingIds(
-    String resourceType,
-    Set<String> ids,
-  ) async {
-    final found = <String>{};
-    final list = ids.toList();
-    for (var i = 0; i < list.length; i += maxIdListInSql) {
-      final end =
-          i + maxIdListInSql > list.length ? list.length : i + maxIdListInSql;
-      final chunk = list.sublist(i, end);
-      final rows = await (selectOnly(resources)
-            ..addColumns([resources.id])
-            ..where(
-              resources.resourceType.equals(resourceType) &
-                  resources.id.isIn(chunk),
-            ))
-          .get();
-      for (final row in rows) {
-        found.add(row.read(resources.id)!);
-      }
-    }
-    return found;
-  }
-
-  Future<Set<String>> _matchingIds({
-    required T resourceType,
-    Map<String, List<String>>? searchParameters,
-    List<HasParameter>? hasParameters,
-    CompartmentScope? compartment,
-    Set<String>? only,
-  }) async {
-    await _ready();
-    final resourceTypeString = resourceType.toString();
-
-    // One SQL statement when every part can be expressed as one; the Dart
-    // set arithmetic below is only for the shapes that cannot.
-    final inSql = await _pagedIds(
-      resourceTypeString,
-      searchParameters,
-      hasParameters,
-      null,
-      null,
-      null,
-      compartment: compartment,
-      only: only,
-    );
-    if (inSql != null) {
-      return inSql.toSet();
-    }
-
-    var matchingIds = <String>{};
-    var firstParam = true;
-
-    // The caller's ids are from this store's own index; they exist, so the
-    // set is the starting point as it stands.
-    if (only != null) {
-      matchingIds = Set<String>.of(only);
-      firstParam = false;
-    }
-
-    // Process _has parameters first (reverse chaining)
-    if (hasParameters != null && hasParameters.isNotEmpty) {
-      for (final hasParam in hasParameters) {
-        final hasIds =
-            await _resolveHasParameter(resourceTypeString, hasParam, 0);
-        if (firstParam) {
-          matchingIds = hasIds;
-          firstParam = false;
-        } else {
-          matchingIds = matchingIds.intersection(hasIds);
-        }
-      }
-    }
-
-    // Process each search parameter
-    if (searchParameters != null && searchParameters.isNotEmpty) {
-      for (final entry in searchParameters.entries) {
-        final paramName = entry.key;
-        final paramValues = entry.value;
-
-        // Handle special parameters
-        if (paramName == '_id') {
-          // Same two rules: each repetition is ANDed, each comma-separated
-          // value inside one is ORed. A resource has one id, so repeating
-          // _id with different values correctly yields nothing.
-          Set<String>? ids;
-          for (final repetition in paramValues) {
-            final orValues = splitEscaped(repetition, ',')
-                .map((v) => v.trim())
-                .where((v) => v.isNotEmpty)
-                .toSet();
-            ids = ids == null ? orValues : ids.intersection(orValues);
-          }
-          if (ids == null) {
-            continue;
-          }
-          // Only ids that exist as this type: the values are the client's
-          // words, not rows. Taken as matches unchecked, a list of absent
-          // ids counted toward the total and filled the sorted page with
-          // ids no resource has, so the page came back empty while the
-          // total said otherwise.
-          ids = await _existingIds(resourceTypeString, ids);
-          if (firstParam) {
-            matchingIds = ids;
-          } else {
-            matchingIds = matchingIds.intersection(ids);
-          }
-          firstParam = false;
-          continue;
-        }
-
-        if (paramName == '_lastUpdated') {
-          final lastUpdatedIds = await _searchLastUpdatedParameter(
-            resourceTypeString,
-            paramValues,
-          );
-          if (firstParam) {
-            matchingIds = lastUpdatedIds;
-          } else {
-            matchingIds = matchingIds.intersection(lastUpdatedIds);
-          }
-          firstParam = false;
-          continue;
-        }
-
-        // R4B 3.1.1.3: "servers SHOULD ignore unknown or unsupported
-        // parameters"; nothing this build has no definition for was ever
-        // indexed, so there is nothing to search. The SQL-paged path skips
-        // them the same way; a strict client's refusal happens in the
-        // server. A chained key is the reference branch's to resolve.
-        final parsedKey = SearchQueryKey.parse(paramName);
-        if (parsedKey.chain == null &&
-            lookupDefinition(resourceTypeString, parsedKey.name) == null) {
-          continue;
-        }
-
-        // Determine parameter type and search accordingly
-        // R4 3.1.1.4.17 gives the two separators different meanings, and a
-        // caller cannot express both through one flat list:
-        //
-        //   ?given=A&given=B   repeated  -> AND, "records that have BOTH"
-        //   ?given=A,B         comma     -> OR,  "records with EITHER"
-        //
-        // So ONE ELEMENT OF THIS LIST IS ONE REPETITION. Each is resolved on
-        // its own and the results intersected; the comma split inside an
-        // element produces the OR set. Passing the whole list to one call, as
-        // this used to, made every repeat behave as OR.
-        Set<String>? paramIds;
-        for (final repetition in paramValues) {
-          final orValues = splitEscaped(repetition, ',')
-              .map((v) => v.trim())
-              .where((v) => v.isNotEmpty)
-              .toList();
-          if (orValues.isEmpty) {
-            continue;
-          }
-          final ids = await _resolveSearchParameter(
-            resourceTypeString,
-            paramName,
-            orValues,
-          );
-          paramIds = paramIds == null ? ids : paramIds.intersection(ids);
-        }
-        if (paramIds == null) {
-          continue;
-        }
-
-        if (firstParam) {
-          matchingIds = paramIds;
-          firstParam = false;
-        } else {
-          matchingIds = matchingIds.intersection(paramIds);
-        }
-      }
-    }
-
-    // If no search parameters were processed, get all resource IDs
-    if (firstParam) {
-      final allRows = await (select(resources)
-            ..where((tbl) => tbl.resourceType.equals(resourceTypeString)))
-          .get();
-      matchingIds = allRows.map((r) => r.id).toSet();
-    }
-    // The compartment context ANDs with everything above (3.1.1.2).
-    if (compartment != null) {
-      matchingIds = matchingIds.intersection(
-        await _compartmentMemberIds(resourceTypeString, compartment),
-      );
-    }
-    return matchingIds;
-  }
 
   /// Get count of resources matching search parameters.
   Future<int> searchCount({
@@ -3347,9 +3127,8 @@ class FhirDao<R extends FhirNode, T extends Object>
       return ids?.length ?? await getResourceCount(resourceType);
     }
 
-    // One COUNT in SQL when the search can be expressed there; the id set
-    // only for the shapes that cannot. This used to fetch every matching
-    // id to take its length: 813,513 strings for status=final.
+    // One COUNT in SQL. This used to fetch every matching id to take its
+    // length: 813,513 strings for status=final.
     final counted = await _pagedIds(
       resourceType.toString(),
       searchParameters,
@@ -3361,17 +3140,7 @@ class FhirDao<R extends FhirNode, T extends Object>
       compartment: compartment,
       only: ids,
     );
-    if (counted != null) {
-      return int.parse(counted.single);
-    }
-    final matching = await _matchingIds(
-      resourceType: resourceType,
-      searchParameters: searchParameters,
-      hasParameters: hasParameters,
-      compartment: compartment,
-      only: ids,
-    );
-    return matching.length;
+    return int.parse(counted.single);
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -4040,157 +3809,6 @@ class FhirDao<R extends FhirNode, T extends Object>
   }
 
   /// Determine the parameter type and dispatch to the appropriate search method.
-  Future<Set<String>> _resolveSearchParameter(
-    String resourceType,
-    String paramName,
-    List<String> paramValues,
-  ) async {
-    // R4 search.html gives exactly two forms, and this DAO used to read both
-    // off the END of the value (`family=Smith:exact`), which is neither:
-    //
-    //   [parameter]:[modifier]=[value]   — modifier on the NAME
-    //   [parameter]=[prefix][value]      — prefix on the VALUE, ordered types
-    //
-    // Every modifier and every comparator was therefore unreachable from a
-    // conforming client, and any string value containing a colon was truncated
-    // at it — `name=Clinic: SOUTH Wing` returned `Clinic: North Wing`.
-    final key = SearchQueryKey.parse(paramName);
-    final modifier = key.modifier;
-
-    // searchPath is the original HTTP param name (e.g., "monitoring-program-name")
-    // The search tables store this in the searchName column alongside the
-    // FHIR expression path in searchPath. Queries match on either.
-    //
-    // A chained key keeps its chain, because the reference branch parses the
-    // chain itself.
-    final searchPath = key.chain == null ? key.name : paramName;
-
-    // What the parameter IS, from the published definitions. This decides
-    // whether `gt` on the front of a value is a comparator or the first two
-    // letters of a name. Not having this fact is why the old code guessed from
-    // the shape of the value.
-    final declared = lookupDefinition(resourceType, key.name);
-
-    // R4 3.1.1.4.4, a SHALL: a modifier the parameter's type does not allow is
-    // rejected, not ignored. Ignoring it silently changes what the query means
-    // and returns records the client did not ask for.
-    //
-    // Only checked when the parameter is known. A custom parameter this build
-    // has no definition for cannot have its modifier validated, and refusing
-    // it on that basis would reject searches a deployment does support.
-    if (declared != null && modifier != null) {
-      if (!model.modifierRules.isAllowed(declared.type, modifier)) {
-        throw UnsupportedSearchModifier(
-          parameter: key.name,
-          modifier: modifier,
-          type: declared.type,
-          allowed: model.modifierRules.allowedFor(declared.type),
-          definedButUnsupported:
-              model.modifierRules.isUnsupported(declared.type, modifier),
-        );
-      }
-    }
-
-    // :missing applies to every parameter type, so it is answered before any
-    // type detection runs. R4 search.html: "true" finds resources where the
-    // parameter is absent, "false" where it is present, so the false case is
-    // the complement rather than a second query.
-    if (modifier == 'missing') {
-      final absent = await _searchMissingParameter(resourceType, searchPath);
-      final wantsAbsent = paramValues
-          .map((v) => _missingValue(key.name, v))
-          .any((v) => v == 'true');
-      if (wantsAbsent) {
-        return absent;
-      }
-      final all = (await (select(resources)
-                ..where((tbl) => tbl.resourceType.equals(resourceType)))
-              .get())
-          .map((r) => r.id)
-          .toSet();
-      return all.difference(absent);
-    }
-
-    // When the parameter is known, its declared type settles everything and
-    // nothing is inferred from the values at all.
-    if (declared != null && key.chain == null) {
-      switch (declared.type) {
-        case 'date':
-          return _searchDateParameter(
-            resourceType,
-            searchPath,
-            paramValues,
-            declared,
-          );
-        case 'quantity':
-          return _searchQuantityParameter(
-            resourceType,
-            searchPath,
-            paramValues,
-            declared,
-          );
-        case 'number':
-          return _searchNumberParameter(
-            resourceType,
-            searchPath,
-            paramValues,
-            declared,
-          );
-        case 'uri':
-          return _searchUriParameter(
-            resourceType,
-            searchPath,
-            paramValues,
-            modifier,
-          );
-        case 'token':
-          return _searchTokenParameter(
-            resourceType,
-            searchPath,
-            paramValues,
-            modifier,
-          );
-        case 'string':
-          return _searchStringParameter(
-            resourceType,
-            searchPath,
-            paramValues,
-            modifier,
-          );
-        case 'composite':
-          return _searchCompositeParameter(
-            resourceType,
-            searchPath,
-            paramValues,
-          );
-        case 'reference':
-          return _searchReferenceParameter(
-            resourceType,
-            searchPath,
-            paramValues,
-            false,
-            modifier,
-          );
-      }
-    }
-
-    // A chained key: the reference branch parses the chain against the
-    // target type's parameters. Nothing else reaches here: a parameter with
-    // no definition is skipped by the caller. The 250-line branch that
-    // guessed a type from the shape of the values (a pipe, a leading digit,
-    // an http prefix) stood here until 2026-09-08 (fhirant
-    // REVIEW-2026-09-06 finding 26).
-    if (key.chain != null || paramName.contains('.')) {
-      return _searchReferenceParameter(
-        resourceType,
-        paramName,
-        paramValues,
-        true,
-        modifier,
-      );
-    }
-    return <String>{};
-  }
 
   // ──────────────────────────────────────────────────────────────────────────
   // Private: Individual search parameter type handlers
@@ -4218,225 +3836,6 @@ class FhirDao<R extends FhirNode, T extends Object>
     return t.resourceType.equals(resourceType) &
         t.searchName.equals(searchPath) &
         FhirDao.startsWith(t.stringValue, normalized);
-  }
-
-  Future<Set<String>> _searchStringParameter(
-    String resourceType,
-    String searchPath,
-    List<String> values,
-    String? modifier,
-  ) async {
-    final matchingIds = <String>{};
-
-    for (final value in values) {
-      // The value is DATA. It used to be split on any colon it contained,
-      // which truncated `Clinic: North Wing` to `Clinic` and made
-      // `name=Clinic: SOUTH Wing` return the North Wing.
-      //
-      // A string is compared whole, so it also has to lose FHIR's escaping
-      // before the comparison: a name written with an escaped comma would
-      // otherwise be matched with the backslash still in it.
-      final searchValue = unescapeValue(value);
-
-      // Folded the same way the index was, or the query and the stored value
-      // normalize differently and an accented name is unfindable.
-      final normalizedValue = normalizeSearchString(searchValue).trim();
-
-      final query = select(stringSearchParameters);
-      var whereCondition =
-          stringSearchParameters.resourceType.equals(resourceType) &
-              stringSearchParameters.searchName.equals(searchPath);
-
-      if (modifier == 'exact') {
-        // R4 3.1.1.4.4: ":exact returns results that match the entire supplied
-        // parameter, including casing and combining characters." So it compares
-        // the value as written, not the normalized one, and the search value
-        // keeps its own casing and accents too.
-        whereCondition = whereCondition &
-            stringSearchParameters.exactValue.equals(searchValue.trim());
-      } else if (modifier == 'contains') {
-        whereCondition = whereCondition &
-            stringSearchParameters.stringValue.like('%$normalizedValue%');
-      } else if (modifier == 'missing') {
-        final allResourceIds = (await (select(resources)
-                  ..where((tbl) => tbl.resourceType.equals(resourceType)))
-                .get())
-            .map((r) => r.id)
-            .toSet();
-        final resourcesWithParam = (await (selectOnly(stringSearchParameters)
-                  ..addColumns([stringSearchParameters.id])
-                  ..where(
-                    stringSearchParameters.resourceType.equals(resourceType) &
-                        stringSearchParameters.searchName.equals(searchPath),
-                  ))
-                .get())
-            .map((r) => r.read(stringSearchParameters.id)!)
-            .toSet();
-        matchingIds.addAll(allResourceIds.difference(resourcesWithParam));
-        continue;
-      } else {
-        // Default string search is "starts with" per FHIR spec
-        whereCondition = whereCondition &
-            FhirDao.startsWith(
-              stringSearchParameters.stringValue,
-              normalizedValue,
-            );
-      }
-
-      query.where((tbl) => whereCondition);
-      // Only the id column is read, not every column of every
-      // matching row; see _executeTokenQuery for the measurement.
-      final idColumn = stringSearchParameters.id;
-      final rows = await (selectOnly(stringSearchParameters, distinct: true)
-            ..addColumns([idColumn])
-            ..where(whereCondition))
-          .get();
-      for (final row in rows) {
-        final id = row.read(idColumn);
-        if (id != null) {
-          matchingIds.add(id);
-        }
-      }
-    }
-
-    return matchingIds;
-  }
-
-  Future<Set<String>> _searchTokenParameter(
-    String resourceType,
-    String searchPath,
-    List<String> values,
-    String? modifier,
-  ) async {
-    final matchingIds = <String>{};
-
-    for (final value in values) {
-      // The modifier arrives from the parameter NAME, per R4 search.html. It
-      // used to be read off the end of the value, so `code:text=x` never
-      // reached this and `code=x:text` did.
-      //
-      // Escaping is stripped AFTER any `|` split below, never before, or the
-      // split would consume an escaped pipe that is part of the value.
-      final searchValue = value;
-
-      if (modifier == 'in') {
-        // :in modifier — value is a ValueSet URL; match tokens in that ValueSet
-        final codes = await expandValueSetByUrl(searchValue);
-        if (codes.isNotEmpty) {
-          for (final entry in codes) {
-            final queryValue = entry.system != null
-                ? '${entry.system}|${entry.code}'
-                : entry.code;
-            final matched = await _executeTokenQuery(
-              resourceType,
-              searchPath,
-              queryValue,
-            );
-            matchingIds.addAll(matched);
-          }
-        }
-        continue;
-      }
-
-      if (modifier == 'not-in') {
-        // :not-in modifier — value is a ValueSet URL; exclude tokens in that VS
-        final codes = await expandValueSetByUrl(searchValue);
-        final allResourceIds = (await (select(resources)
-                  ..where((tbl) => tbl.resourceType.equals(resourceType)))
-                .get())
-            .map((r) => r.id)
-            .toSet();
-        final excludedIds = <String>{};
-        for (final entry in codes) {
-          final queryValue = entry.system != null
-              ? '${entry.system}|${entry.code}'
-              : entry.code;
-          final matched = await _executeTokenQuery(
-            resourceType,
-            searchPath,
-            queryValue,
-          );
-          excludedIds.addAll(matched);
-        }
-        matchingIds.addAll(allResourceIds.difference(excludedIds));
-        continue;
-      }
-
-      if (modifier == 'not') {
-        final allResourceIds = (await (select(resources)
-                  ..where((tbl) => tbl.resourceType.equals(resourceType)))
-                .get())
-            .map((r) => r.id)
-            .toSet();
-        final matched =
-            await _executeTokenQuery(resourceType, searchPath, searchValue);
-        matchingIds.addAll(allResourceIds.difference(matched));
-        continue;
-      }
-
-      if (modifier == 'text') {
-        final query = select(tokenSearchParameters)
-          ..where(
-            (tbl) =>
-                tbl.resourceType.equals(resourceType) &
-                tbl.searchName.equals(searchPath) &
-                tbl.tokenDisplay
-                    .substr(1, normalizeSearchString(searchValue).length)
-                    .equals(normalizeSearchString(searchValue)),
-          );
-        final rows = await query.get();
-        for (final row in rows) {
-          matchingIds.add(row.id);
-        }
-        continue;
-      }
-
-      if (modifier == 'of-type') {
-        // :of-type modifier for Identifier: typeSystem|typeCode|value
-        // Searches identifiers where type.coding matches and value matches.
-        // Since identifier.type is not indexed, we search by value first,
-        // then filter by type in Dart.
-        final pipeParts = splitEscaped(searchValue, '|');
-        if (pipeParts.length == 3) {
-          final typeSystem = pipeParts[0];
-          final typeCode = pipeParts[1];
-          final identifierValue = pipeParts[2];
-
-          // Phase 1: Find candidate resources by identifier value
-          final candidates = await _executeTokenQuery(
-            resourceType,
-            searchPath,
-            identifierValue,
-          );
-
-          // Phase 2: Filter by identifier.type in Dart
-          for (final candidateId in candidates) {
-            final resourceType_ = model.typeFromName(resourceType);
-            if (resourceType_ == null) continue;
-            final resource = await getResource(resourceType_, candidateId);
-            if (resource == null) continue;
-
-            final json = model.jsonOf(resource);
-            if (_matchesOfType(
-              json,
-              searchPath,
-              typeSystem,
-              typeCode,
-              identifierValue,
-            )) {
-              matchingIds.add(candidateId);
-            }
-          }
-        }
-        continue;
-      }
-
-      final matched =
-          await _executeTokenQuery(resourceType, searchPath, searchValue);
-      matchingIds.addAll(matched);
-    }
-
-    return matchingIds;
   }
 
   /// `column` starts with [prefix], written as a range the covering index
@@ -4539,46 +3938,6 @@ class FhirDao<R extends FhirNode, T extends Object>
       }
     }
     return whereCondition;
-  }
-
-  Future<Set<String>> _executeTokenQuery(
-    String resourceType,
-    String searchPath,
-    String searchValue, {
-    int? limit,
-    int? offset,
-  }) async {
-    final matchingIds = <String>{};
-    final whereCondition =
-        _tokenCondition(resourceType, searchPath, searchValue);
-
-    // Only the id column is wanted, so only the id column is read. Selecting
-    // whole rows marshalled every column of every match — searchPath,
-    // searchName, tokenSystem, tokenValue, paramIndex, lastUpdated — to keep
-    // one string. On 928,935 MIMIC resources, `Observation?status=final`
-    // matches 813,513 rows, so that is 813,513 rows built and discarded.
-    final idColumn = tokenSearchParameters.id;
-    final query = selectOnly(tokenSearchParameters, distinct: true)
-      ..addColumns([idColumn])
-      ..where(whereCondition);
-    if (limit != null) {
-      // The page is cut HERE, in SQL, when the caller can prove it is the
-      // whole answer. Measured on 928,935 resources, `status=final`,
-      // 813,513 matches: every id 3.77s; `ORDER BY id LIMIT 20` 0.55s. The
-      // ORDER BY is what makes offset 20 follow offset 0.
-      query
-        ..orderBy([OrderingTerm.asc(idColumn)])
-        ..limit(limit, offset: offset);
-    }
-    final rows = await query.get();
-    for (final row in rows) {
-      final id = row.read(idColumn);
-      if (id != null) {
-        matchingIds.add(id);
-      }
-    }
-
-    return matchingIds;
   }
 
   /// The expansion of the ValueSet whose url is [valueSetUrl]; what `:in`
@@ -4744,86 +4103,8 @@ class FhirDao<R extends FhirNode, T extends Object>
   ///
   /// Walks through the resource JSON to find identifier fields at the
   /// given search path that have a matching type coding and value.
-  bool _matchesOfType(
-    Map<String, dynamic> json,
-    String searchPath,
-    String typeSystem,
-    String typeCode,
-    String identifierValue,
-  ) {
-    // The searchPath is the FHIR search parameter name (e.g., "identifier").
-    // We need to find all Identifier elements in the resource and check
-    // if any match both the type coding and the value.
-
-    // Try common field names for identifiers
-    final fieldsToCheck = <String>['identifier'];
-
-    // Also check the searchPath itself as a field name
-    if (!fieldsToCheck.contains(searchPath)) {
-      fieldsToCheck.add(searchPath);
-    }
-
-    for (final field in fieldsToCheck) {
-      final fieldValue = json[field];
-      if (fieldValue is List) {
-        for (final item in fieldValue) {
-          if (item is Map<String, dynamic>) {
-            if (_identifierMatchesOfType(
-              item,
-              typeSystem,
-              typeCode,
-              identifierValue,
-            )) {
-              return true;
-            }
-          }
-        }
-      } else if (fieldValue is Map<String, dynamic>) {
-        if (_identifierMatchesOfType(
-          fieldValue,
-          typeSystem,
-          typeCode,
-          identifierValue,
-        )) {
-          return true;
-        }
-      }
-    }
-
-    return false;
-  }
 
   /// Check if a single Identifier JSON object matches the :of-type criteria.
-  bool _identifierMatchesOfType(
-    Map<String, dynamic> identifier,
-    String typeSystem,
-    String typeCode,
-    String identifierValue,
-  ) {
-    // Check value
-    final value = identifier['value'];
-    if (value?.toString() != identifierValue) return false;
-
-    // Check type.coding
-    final type = identifier['type'];
-    if (type is! Map<String, dynamic>) return false;
-
-    final coding = type['coding'];
-    if (coding is! List) return false;
-
-    for (final c in coding) {
-      if (c is Map<String, dynamic>) {
-        final system = c['system']?.toString() ?? '';
-        final code = c['code']?.toString() ?? '';
-        if ((typeSystem.isEmpty || system == typeSystem) &&
-            (typeCode.isEmpty || code == typeCode)) {
-          return true;
-        }
-      }
-    }
-
-    return false;
-  }
 
   /// The WHERE for one date value with its prefix, or null when the value
   /// is not a search date.
@@ -4938,99 +4219,9 @@ class FhirDao<R extends FhirNode, T extends Object>
     }
   }
 
-  Future<Set<String>> _searchDateParameter(
-    String resourceType,
-    String searchPath,
-    List<String> values,
-    SearchParameterDefinition? declared,
-  ) async {
-    final matchingIds = <String>{};
-
-    for (final value in values) {
-      String? modifier;
-      var searchValue = value;
-
-      // The comparators the PARAMETER declares, not a list copied out of the
-      // prose. R4 core declares all nine on every date parameter, but a
-      // deployment's custom parameter may declare fewer and must then be held
-      // to that.
-      final (prefix, rest) = splitComparator(
-        declared ?? const SearchParameterDefinition('date', comparatorPrefixes),
-        value,
-      );
-      if (prefix != null) {
-        modifier = prefix;
-        searchValue = rest;
-      }
-
-      if (modifier == 'missing') {
-        final allResourceIds = (await (select(resources)
-                  ..where((tbl) => tbl.resourceType.equals(resourceType)))
-                .get())
-            .map((r) => r.id)
-            .toSet();
-        final resourcesWithParam = (await (selectOnly(dateSearchParameters)
-                  ..addColumns([dateSearchParameters.id])
-                  ..where(
-                    dateSearchParameters.resourceType.equals(resourceType) &
-                        dateSearchParameters.searchName.equals(searchPath),
-                  ))
-                .get())
-            .map((r) => r.read(dateSearchParameters.id)!)
-            .toSet();
-        matchingIds.addAll(allResourceIds.difference(resourcesWithParam));
-        continue;
-      }
-
-      final whereCondition =
-          _dateCondition(resourceType, searchPath, modifier, searchValue);
-      if (whereCondition == null) {
-        continue;
-      }
-
-      final idColumn = dateSearchParameters.id;
-      final rows = await (selectOnly(dateSearchParameters, distinct: true)
-            ..addColumns([idColumn])
-            ..where(whereCondition))
-          .get();
-      for (final row in rows) {
-        final id = row.read(idColumn);
-        if (id != null) {
-          matchingIds.add(id);
-        }
-      }
-    }
-
-    return matchingIds;
-  }
-
   /// `_lastUpdated` reads `resources.last_updated`, an instant in
   /// milliseconds, so the stored range is the point `[t, t + 1ms)`; the
   /// prefix semantics are the same as for every other date parameter.
-  Future<Set<String>> _searchLastUpdatedParameter(
-    String resourceType,
-    List<String> values,
-  ) async {
-    final matchingIds = <String>{};
-    for (final value in values) {
-      final (prefix, rest) = splitComparator(
-        const SearchParameterDefinition('date', comparatorPrefixes),
-        value,
-      );
-      final condition = _lastUpdatedCondition(prefix, rest);
-      if (condition == null) {
-        continue;
-      }
-      final rows = await (selectOnly(resources)
-            ..addColumns([resources.id])
-            ..where(resources.resourceType.equals(resourceType) & condition))
-          .get();
-      for (final row in rows) {
-        matchingIds.add(row.read(resources.id)!);
-      }
-    }
-    return matchingIds;
-  }
 
   /// The WHERE on `resources.last_updated` for one `_lastUpdated` value, or
   /// null when the value is not a search date.
@@ -5103,51 +4294,6 @@ class FhirDao<R extends FhirNode, T extends Object>
       default:
         return contained;
     }
-  }
-
-  Future<Set<String>> _searchMissingParameter(
-    String resourceType,
-    String paramName,
-  ) async {
-    final allResourceIds = (await (select(resources)
-              ..where((tbl) => tbl.resourceType.equals(resourceType)))
-            .get())
-        .map((r) => r.id)
-        .toSet();
-
-    // Check across all search parameter tables
-    final idsWithParam = <String>{};
-
-    for (final table in <ResultSetImplementation<dynamic, dynamic>>[
-      stringSearchParameters,
-      tokenSearchParameters,
-      referenceSearchParameters,
-      dateSearchParameters,
-      numberSearchParameters,
-      quantitySearchParameters,
-      uriSearchParameters,
-      compositeSearchParameters,
-      specialSearchParameters,
-    ]) {
-      // By name, on the owner index. This used to select on `search_path`,
-      // a column no index table has had since schema 10, so any `:missing`
-      // that reached this path was a SQL error and the server's 500
-      // (fhirant REVIEW-2026-09-08 row 33).
-      final rows = await customSelect(
-        'SELECT DISTINCT id FROM ${table.entityName} '
-        'WHERE resource_type = ? AND search_name = ?',
-        variables: [
-          Variable.withString(resourceType),
-          Variable.withString(paramName),
-        ],
-        readsFrom: {table},
-      ).get();
-      for (final row in rows) {
-        idsWithParam.add(row.data['id'] as String);
-      }
-    }
-
-    return allResourceIds.difference(idsWithParam);
   }
 
   /// The comparison of a stored numeric range `[low, high)` against a search
@@ -5291,46 +4437,6 @@ class FhirDao<R extends FhirNode, T extends Object>
         );
   }
 
-  Future<Set<String>> _searchNumberParameter(
-    String resourceType,
-    String searchPath,
-    List<String> values,
-    SearchParameterDefinition? declared,
-  ) async {
-    final matchingIds = <String>{};
-    for (final value in values) {
-      String? modifier;
-      var searchValue = value;
-      final (prefix, rest) = splitComparator(
-        declared ??
-            const SearchParameterDefinition('quantity', comparatorPrefixes),
-        value,
-      );
-      if (prefix != null) {
-        modifier = prefix;
-        searchValue = rest;
-      }
-
-      final whereCondition =
-          _numberCondition(resourceType, searchPath, modifier, searchValue);
-      if (whereCondition == null) {
-        continue;
-      }
-      final idColumn = numberSearchParameters.id;
-      final rows = await (selectOnly(numberSearchParameters, distinct: true)
-            ..addColumns([idColumn])
-            ..where(whereCondition))
-          .get();
-      for (final row in rows) {
-        final id = row.read(idColumn);
-        if (id != null) {
-          matchingIds.add(id);
-        }
-      }
-    }
-    return matchingIds;
-  }
-
   /// The WHERE for one quantity value — `[prefix]number|system|code` — or
   /// null when the number does not parse.
   Expression<bool>? _quantityCondition(
@@ -5387,46 +4493,6 @@ class FhirDao<R extends FhirNode, T extends Object>
         );
   }
 
-  Future<Set<String>> _searchQuantityParameter(
-    String resourceType,
-    String searchPath,
-    List<String> values,
-    SearchParameterDefinition? declared,
-  ) async {
-    final matchingIds = <String>{};
-    for (final value in values) {
-      String? modifier;
-      var searchValue = value;
-      final (prefix, rest) = splitComparator(
-        declared ??
-            const SearchParameterDefinition('number', comparatorPrefixes),
-        value,
-      );
-      if (prefix != null) {
-        modifier = prefix;
-        searchValue = rest;
-      }
-
-      final whereCondition =
-          _quantityCondition(resourceType, searchPath, modifier, searchValue);
-      if (whereCondition == null) {
-        continue;
-      }
-      final idColumn = quantitySearchParameters.id;
-      final rows = await (selectOnly(quantitySearchParameters, distinct: true)
-            ..addColumns([idColumn])
-            ..where(whereCondition))
-          .get();
-      for (final row in rows) {
-        final id = row.read(idColumn);
-        if (id != null) {
-          matchingIds.add(id);
-        }
-      }
-    }
-    return matchingIds;
-  }
-
   /// Whether a uri search value is a URL (a scheme with an authority), as
   /// opposed to a URN such as an OID, for 3.1.1.4.9's rule that `:above`
   /// and `:below` apply only to URLs.
@@ -5465,46 +4531,6 @@ class FhirDao<R extends FhirNode, T extends Object>
       return path & t.uriValue.equals(url) & existsQuery(versioned);
     }
     return path & t.uriValue.equals(unescaped);
-  }
-
-  Future<Set<String>> _searchUriParameter(
-    String resourceType,
-    String searchPath,
-    List<String> values, [
-    String? modifier,
-  ]) async {
-    // The same conditions the SQL-paged path builds, so both paths mean
-    // the same thing (this one is reached only for shapes the paged path
-    // cannot build, which for a uri is none of its own modifiers).
-    final matchingIds = <String>{};
-    final declared = lookupDefinition(resourceType, searchPath) ??
-        const SearchParameterDefinition('uri', []);
-    for (final value in values) {
-      final part = await _conditionFor(
-        resourceType,
-        searchPath,
-        value,
-        declared,
-        modifier: modifier,
-      );
-      if (part == null) {
-        continue;
-      }
-      final whole = selectOnly(part.table, distinct: true)
-        ..addColumns([part.idColumn])
-        ..where(part.condition);
-      if (part.orderHint case final hint?) {
-        whole.orderBy([OrderingTerm.asc(hint)]);
-      }
-      final rows = await whole.get();
-      for (final row in rows) {
-        final id = row.read(part.idColumn);
-        if (id != null) {
-          matchingIds.add(id);
-        }
-      }
-    }
-    return matchingIds;
   }
 
   /// The WHERE for one plain reference value, `Type/id` or a bare `id`, as a
@@ -5614,163 +4640,6 @@ class FhirDao<R extends FhirNode, T extends Object>
     return where;
   }
 
-  Future<Set<String>> _searchReferenceParameter(
-    String resourceType,
-    String searchPath,
-    List<String> values,
-    bool isChained, [
-    String? modifier,
-  ]) async {
-    final matchingIds = <String>{};
-
-    if (isChained) {
-      // Reference chaining: paramName = "organization.name"
-      // Also supports type-constrained chaining: "subject:Patient.name"
-      final dotIndex = searchPath.indexOf('.');
-      var refParam = searchPath.substring(0, dotIndex);
-      final chainedParam = searchPath.substring(dotIndex + 1);
-
-      // Parse type constraint from refParam (e.g., "subject:Patient")
-      String? typeConstraint;
-      if (refParam.contains(':')) {
-        final colonIndex = refParam.indexOf(':');
-        typeConstraint = refParam.substring(colonIndex + 1);
-        refParam = refParam.substring(0, colonIndex);
-      }
-
-      // Get all reference entries for this param
-      final refQuery = select(referenceSearchParameters)
-        ..where(
-          (tbl) =>
-              tbl.resourceType.equals(resourceType) &
-              tbl.searchName.equals(refParam),
-        );
-      final refRows = await refQuery.get();
-
-      for (final refRow in refRows) {
-        if (refRow.referenceResourceType != null &&
-            refRow.referenceIdPart != null) {
-          // If type constraint specified, skip references to other types
-          if (typeConstraint != null &&
-              refRow.referenceResourceType != typeConstraint) {
-            continue;
-          }
-          final targetType = model.typeFromName(refRow.referenceResourceType!);
-          if (targetType == null) continue;
-          final targetResults = await search(
-            resourceType: targetType,
-            searchParameters: {chainedParam: values},
-          );
-          if (targetResults.isNotEmpty) {
-            matchingIds.add(refRow.id);
-          }
-        }
-      }
-    } else {
-      for (final value in values) {
-        final query = select(referenceSearchParameters);
-        var whereCondition =
-            referenceSearchParameters.resourceType.equals(resourceType) &
-                referenceSearchParameters.searchName.equals(searchPath);
-
-        // R4 3.1.1.4.12: ":identifier allows for searching by the identifier
-        // rather than the literal reference ... the search value works as a
-        // token search". So it tests Reference.identifier, NOT the referenced
-        // resource — an Observation whose subject carries the MRN matches,
-        // while one that merely points at a Patient holding that MRN does not.
-        if (modifier == 'identifier') {
-          whereCondition = whereCondition &
-              _identifierCondition(referenceSearchParameters, value);
-          query.where((tbl) => whereCondition);
-          for (final row in await query.get()) {
-            matchingIds.add(row.id);
-          }
-          continue;
-        }
-
-        // R4 3.1.1.4.12: a resource type as the modifier says which type the
-        // reference must point at, and `subject:Patient=23` "has the same
-        // effect as" `subject=Patient/23`.
-        if (modifier != null && modifier != 'missing' && !value.contains('/')) {
-          whereCondition = whereCondition &
-              referenceSearchParameters.referenceResourceType.equals(modifier) &
-              referenceSearchParameters.referenceIdPart
-                  .equals(unescapeValue(value));
-          query.where((tbl) => whereCondition);
-          for (final row in await query.get()) {
-            matchingIds.add(row.id);
-          }
-          continue;
-        }
-
-        // The same builder the SQL-paged path uses, so `Type/id`, a bare
-        // id and an absolute or canonical URL mean the same thing on both.
-        // Before this an absolute URL added NO condition at all, so
-        // `subject=http://server/Patient/23` returned every resource that
-        // had a subject.
-        whereCondition = _referenceCondition(resourceType, searchPath, value);
-
-        query.where((tbl) => whereCondition);
-        // Only the id column is read; see _executeTokenQuery.
-        //
-        // This conversion regressed once — `subject=Patient/does-not-exist`
-        // went from 0.01s to 10.35s — and the cause was measured with
-        // EXPLAIN QUERY PLAN: with no sqlite_stat1, the planner chose the
-        // primary key for the DISTINCT-id shape, whose leading column
-        // resource_type matched 2.9 million rows. The database is ANALYZEd
-        // on open now (fhir_db.dart, beforeOpen), and with statistics the
-        // planner picks idx_ref_id for both shapes.
-        final idColumn = referenceSearchParameters.id;
-        final rows =
-            await (selectOnly(referenceSearchParameters, distinct: true)
-                  ..addColumns([idColumn])
-                  ..where(whereCondition))
-                .get();
-        for (final row in rows) {
-          final id = row.read(idColumn);
-          if (id != null) {
-            matchingIds.add(id);
-          }
-        }
-      }
-    }
-
-    return matchingIds;
-  }
-
-  Future<Set<String>> _searchCompositeParameter(
-    String resourceType,
-    String compositeParamName,
-    List<String> values,
-  ) async {
-    // The same condition the SQL-paged path builds. This used to split the
-    // parameter NAME on `-` to guess its components (`code-value-quantity`
-    // → code, value, quantity) and intersect resource-level matches, which
-    // is neither the right components nor the same-element rule.
-    final matchingIds = <String>{};
-    final declared = lookupDefinition(resourceType, compositeParamName);
-    if (declared == null || declared.components.isEmpty) return matchingIds;
-    for (final value in values) {
-      final rows = await (selectOnly(compositeSearchParameters, distinct: true)
-            ..addColumns([compositeSearchParameters.id])
-            ..where(
-              _compositeCondition(
-                resourceType,
-                compositeParamName,
-                value,
-                declared,
-                compositeSearchParameters,
-              ),
-            ))
-          .get();
-      for (final row in rows) {
-        final id = row.read(compositeSearchParameters.id);
-        if (id != null) matchingIds.add(id);
-      }
-    }
-    return matchingIds;
-  }
-
   /// The patient this resource is about, or null when it names none.
   ///
   /// Reads the reference search index rather than the resource itself: the
@@ -5803,57 +4672,6 @@ class FhirDao<R extends FhirNode, T extends Object>
     return null;
   }
 
-  Future<Set<String>> _resolveHasParameter(
-    String sourceResourceType,
-    HasParameter hasParam,
-    int depth,
-  ) async {
-    if (depth > 3) return {};
-
-    final targetType = hasParam.targetType;
-    final targetResourceType = model.typeFromName(targetType);
-    if (targetResourceType == null) return {};
-
-    Set<String> targetIds;
-
-    if (hasParam.nested != null) {
-      targetIds =
-          await _resolveHasParameter(targetType, hasParam.nested!, depth + 1);
-    } else {
-      final results = await search(
-        resourceType: targetResourceType,
-        searchParameters: {
-          hasParam.searchParam: [hasParam.value],
-        },
-      );
-      targetIds = results
-          .map((r) => r.resourceId ?? '')
-          .where((id) => id.isNotEmpty)
-          .toSet();
-    }
-
-    if (targetIds.isEmpty) return {};
-
-    final matchingSourceIds = <String>{};
-    for (final targetId in targetIds) {
-      final refs = await (select(referenceSearchParameters)
-            ..where(
-              (tbl) =>
-                  tbl.resourceType.equals(targetType) &
-                  tbl.id.equals(targetId) &
-                  tbl.referenceResourceType.equals(sourceResourceType),
-            ))
-          .get();
-      for (final ref in refs) {
-        if (ref.referenceIdPart != null) {
-          matchingSourceIds.add(ref.referenceIdPart!);
-        }
-      }
-    }
-
-    return matchingSourceIds;
-  }
-
   // ──────────────────────────────────────────────────────────────────────────
   // Private: Sorting helper
   // ──────────────────────────────────────────────────────────────────────────
@@ -5869,44 +4687,6 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// the set of multiple parameters that comes earliest in the specified
   /// sort order": the smallest value ascending, the largest descending. A
   /// resource with no value sorts last; ties break on id.
-  Future<void> _sortResults(
-    List<R> results,
-    List<String> sort,
-    String resourceType,
-  ) async {
-    final rules = <(String name, bool descending, SearchParameterDefinition?)>[
-      for (final rule in sort)
-        if (rule.startsWith('-'))
-          (
-            rule.substring(1),
-            true,
-            lookupDefinition(resourceType, rule.substring(1))
-          )
-        else
-          (rule, false, lookupDefinition(resourceType, rule)),
-    ];
-    final keys = <String, List<Comparable<Object>?>>{
-      for (final r in results)
-        r.resourceId ?? '': [
-          for (final (name, descending, declared) in rules)
-            _sortKeyOf(r, name, descending, declared),
-        ],
-    };
-    results.sort((a, b) {
-      final ka = keys[a.resourceId ?? '']!;
-      final kb = keys[b.resourceId ?? '']!;
-      for (final (i, (_, descending, _)) in rules.indexed) {
-        final va = ka[i];
-        final vb = kb[i];
-        if (va == null && vb == null) continue;
-        if (va == null) return 1;
-        if (vb == null) return -1;
-        final c = va.compareTo(vb);
-        if (c != 0) return descending ? -c : c;
-      }
-      return (a.resourceId ?? '').compareTo(b.resourceId ?? '');
-    });
-  }
 
   /// One resource's key for one sort rule: the earliest of its values in the
   /// rule's direction, typed so numbers and dates compare as themselves.
@@ -5916,80 +4696,6 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// no modulo operator; the alias is the one the join gave the table.
   Expression<bool> _wholeValueRow($StringSearchParametersTable s) =>
       CustomExpression<bool>('"${s.aliasedName}"."param_index" % 100 = 0');
-
-  Comparable<Object>? _sortKeyOf(
-    R resource,
-    String name,
-    bool descending,
-    SearchParameterDefinition? declared,
-  ) {
-    if (name == '_id') return resource.resourceId;
-    if (name == '_lastUpdated') {
-      return resource.metaLastUpdated;
-    }
-    if (declared == null) return null;
-    bool named(String searchName) => searchName == name;
-    final lists = extractSearchParameters(resource);
-    final values = <Comparable<Object>>[];
-    switch (declared.type) {
-      case 'string':
-        // Whole values only, as in _sortKeyFor.
-        for (final p in lists.stringParams) {
-          if (named(p.searchName.value) && p.paramIndex.value % 100 == 0) {
-            values.add(p.stringValue.value);
-          }
-        }
-      case 'token':
-        // Coded rows only, as in _sortKeyFor.
-        for (final p in lists.tokenParams) {
-          if (named(p.searchName.value) && p.tokenValue.value.isNotEmpty) {
-            values.add(p.tokenValue.value);
-          }
-        }
-      case 'date':
-        for (final p in lists.dateParams) {
-          if (named(p.searchName.value)) {
-            final low = p.dateValue.value;
-            if (low != null) values.add(low);
-          }
-        }
-      case 'number':
-        for (final p in lists.numberParams) {
-          if (named(p.searchName.value)) {
-            final low = p.numberLow.value;
-            if (low != null) values.add(low);
-          }
-        }
-      case 'quantity':
-        for (final p in lists.quantityParams) {
-          if (named(p.searchName.value)) {
-            final low = p.quantityLow.value;
-            if (low != null) values.add(low);
-          }
-        }
-      case 'reference':
-        for (final p in lists.referenceParams) {
-          if (named(p.searchName.value)) {
-            final v = p.referenceValue.value;
-            if (v != null) values.add(v);
-          }
-        }
-      case 'uri':
-        for (final p in lists.uriParams) {
-          if (named(p.searchName.value)) {
-            values.add(p.uriValue.value);
-          }
-        }
-      default:
-        return null;
-    }
-    if (values.isEmpty) return null;
-    return values.reduce(
-      (a, b) => descending
-          ? (a.compareTo(b) >= 0 ? a : b)
-          : (a.compareTo(b) <= 0 ? a : b),
-    );
-  }
 }
 
 /// One search parameter expressed as a WHERE on its own index table.
