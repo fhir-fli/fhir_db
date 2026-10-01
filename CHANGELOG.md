@@ -28,6 +28,12 @@
     dropped; the rules after it still apply (3.1.1.5.1).
   - A number, quantity, date, uri, string, special or composite modifier
     the builders have no meaning for is refused rather than passed on.
+- **An `_id` list or caller id set of any length is searched in SQL**
+  (ST4, step 2 of 4). Past 500 values the list is one literal JSON array
+  read with `json_each` (SQLite ≥ 3.38.0), not one bound `id = ?` per
+  value; 40,000 ids answer in well under a second where the bound form
+  overflowed the stack. The set path is now reached only for a token
+  `:of-type`.
 
 ## [0.14.0]
 

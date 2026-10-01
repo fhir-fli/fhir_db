@@ -253,4 +253,81 @@ void main() {
     );
     expect(dao.lastSearchPagedInSql, isTrue);
   });
+
+  test('an _id list of any length is one bound JSON array, in SQL', () async {
+    // The set path existed for this: 40,000 comma-separated ids (a
+    // `_filter` result joined back as `_id`) built an OR chain that
+    // overflowed the stack at 387 ms (measured 2026-09-08). In SQL the
+    // list is one literal JSON array read by json_each.
+    final many = [
+      for (var i = 0; i < 40000; i++) 'absent$i',
+      'p1',
+      'p3',
+    ].join(',');
+    final sw = Stopwatch()..start();
+    expect(
+      await ids('Patient', {
+        '_id': [many],
+      }),
+      ['p1', 'p3'],
+    );
+    sw.stop();
+    expect(dao.lastSearchPagedInSql, isTrue);
+    expect(sw.elapsedMilliseconds, lessThan(2000));
+    // ANDed with another condition, and counted.
+    expect(
+      await ids('Patient', {
+        '_id': [many],
+        'gender': ['female'],
+      }),
+      ['p1', 'p3'],
+    );
+    expect(dao.lastSearchPagedInSql, isTrue);
+    expect(
+      await dao.searchCount(
+        resourceType: 'Patient',
+        searchParameters: {
+          '_id': [many],
+        },
+      ),
+      2,
+    );
+    // An id holding the characters JSON and SQL quote, so the literal has
+    // to be escaped twice over.
+    await dao.saveResource(
+      JsonNode.resource({
+        'resourceType': 'Patient',
+        'id': "q'uo\"te",
+      }),
+    );
+    expect(
+      await ids('Patient', {
+        '_id': [
+          [for (var i = 0; i < 600; i++) 'absent$i', "q'uo\"te"].join(','),
+        ],
+      }),
+      ["q'uo\"te"],
+    );
+    expect(dao.lastSearchPagedInSql, isTrue);
+  });
+
+  test('a caller id set of any length is one bound JSON array, in SQL',
+      () async {
+    // `ids:` is fhirant's `_filter` result; over 500 it took the set path.
+    final many = {for (var i = 0; i < 40000; i++) 'absent$i', 'p2', 'p3'};
+    final page = await dao.search(
+      resourceType: 'Patient',
+      searchParameters: {
+        'gender': ['female'],
+      },
+      ids: many,
+      count: 20,
+    );
+    expect(page.map((r) => r.resourceId), ['p3']);
+    expect(dao.lastSearchPagedInSql, isTrue);
+    expect(
+      await dao.searchIds(resourceType: 'Patient', ids: many),
+      {'p2', 'p3'},
+    );
+  });
 }
