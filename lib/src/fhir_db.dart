@@ -114,7 +114,7 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
   late final FhirDao<R, T> fhirDao = FhirDao<R, T>(this);
 
   @override
-  int get schemaVersion => 14;
+  int get schemaVersion => 15;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -332,6 +332,13 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
           }
           if (from < 14) {
             await moveCurrentVersionsOutOfHistory();
+          }
+          if (from < 15) {
+            // Schema 15 adds no column: the token index gains one
+            // `<param>:of-type` row per Identifier.type.coding, which only
+            // a re-extraction writes for resources already stored. Derived
+            // data is rebuilt, never left stale.
+            await rebuildSearchIndex(includeUploaded: false);
           }
         },
         beforeOpen: ensurePlannerStatistics,

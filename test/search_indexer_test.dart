@@ -73,6 +73,49 @@ void main() {
       expect(rows.single.tokenDisplay.value, 'medical record');
     });
 
+    test('an Identifier with type codings adds one :of-type row per coding',
+        () {
+      // R4B search.html 3.1.1.4.10 (read whole 2026-10-01), `:of-type`:
+      // "system|code|value, where the system and code refer to a
+      // Identifier.type.coding.system and .code, and match if any of the
+      // type codes match". Indexed as HAPI does
+      // (BaseSearchParamExtractor.addToken_Identifier, read 2026-10-01):
+      // a token row named `<param>:of-type`, system = the type coding's
+      // system, value = `<type code>|<identifier value>`.
+      final rows = indexer.tokenRows(
+        node('Identifier', {
+          'system': 'urn:mrn',
+          'value': '12345',
+          'type': {
+            'coding': [
+              {
+                'system': 'http://terminology.hl7.org/CodeSystem/v2-0203',
+                'code': 'MR',
+              },
+              {'code': 'local'},
+            ],
+          },
+        }),
+        'Patient',
+        'p1',
+        0,
+        'Patient.identifier',
+        0,
+        searchName: 'identifier',
+      );
+      expect(rows.length, 3);
+      expect(rows[0].searchName.value, 'identifier');
+      expect(rows[1].searchName.value, 'identifier:of-type');
+      expect(
+        rows[1].tokenSystem.value,
+        'http://terminology.hl7.org/CodeSystem/v2-0203',
+      );
+      expect(rows[1].tokenValue.value, 'MR|12345');
+      expect(rows[2].searchName.value, 'identifier:of-type');
+      expect(rows[2].tokenSystem.present, isFalse);
+      expect(rows[2].tokenValue.value, 'local|12345');
+    });
+
     test('a code, boolean, string, id and ContactPoint each give one row', () {
       for (final (type, value, expected) in [
         ('code', 'male', 'male'),
