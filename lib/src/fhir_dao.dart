@@ -947,16 +947,28 @@ class FhirDao<R extends FhirNode, T extends Object>
         only: ids,
       );
 
-  /// Above this many comma-separated `_id` values in one repetition, the
-  /// search takes the set path rather than SQL. In SQL each value is one
-  /// bound `id = ?` in an OR chain, so a list of tens of thousands of ids (a
-  /// `_filter` result joined back as `_id`) built a statement of that many
-  /// variables; the set path keeps the list as a Dart set, intersects it
-  /// with the other conditions, and pages the sorted ids before reading any
-  /// resource. Measured 2026-09-08 with a 40,000-value list on an in-memory
-  /// store: the SQL path threw `Stack Overflow` after 387 ms building the OR
-  /// expression; the set path answers the same two matches in 187 ms.
+  /// Above this many ids in one `_id` repetition or one caller id set, the
+  /// list is sent to SQLite as ONE literal JSON array and read with
+  /// `json_each` ([_idsIn]) instead of one bound `id = ?` per value. The
+  /// per-value form built an OR expression tree that overflowed the stack
+  /// at 40,000 values (387 ms, measured 2026-09-08) and would hit
+  /// SQLITE_MAX_VARIABLE_NUMBER (32,766) as bound variables; the JSON form
+  /// has one literal whatever the length. Below this many, the bound form
+  /// is kept: it is what the covering index serves directly.
   static const maxIdListInSql = 500;
+
+  /// `id IN (SELECT value FROM json_each('[…]'))` on [r], the ids as one
+  /// JSON array literal. Escaped twice: JSON-encoded, then the SQL string's
+  /// own quote doubled. json_each has been built into SQLite since 3.38.0
+  /// (2022-02-22); the test store runs 3.53.4, the sqlite3mc library the
+  /// apps ship tracks the same package. Postgres would spell this
+  /// `json_array_elements_text`.
+  Expression<bool> _idsIn($ResourcesTable r, Iterable<String> ids) {
+    final literal = jsonEncode(ids.toList()).replaceAll("'", "''");
+    return CustomExpression<bool>(
+      '"${r.aliasedName}"."id" IN (SELECT value FROM json_each(\'$literal\'))',
+    );
+  }
 
   /// Search resources using search parameters.
   ///
@@ -1175,7 +1187,20 @@ class FhirDao<R extends FhirNode, T extends Object>
         // 3.1.1.3: "Empty parameters are not an error - they are just
         // ignored by the server."
         if (orValues.isEmpty) continue;
-        if (key.name == '_id' && orValues.length > maxIdListInSql) return null;
+        if (key.name == '_id' && orValues.length > maxIdListInSql) {
+          // A long list is one literal JSON array rather than one `id = ?`
+          // per value: see [_idsIn].
+          final r = parts.isEmpty ? resources : alias(resources, nextAlias());
+          parts.add(
+            _IndexCondition(
+              r,
+              r.id,
+              r.resourceType.equals(resourceType) &
+                  _idsIn(r, orValues.map(unescapeValue)),
+            ),
+          );
+          continue;
+        }
 
         // The first condition is the outer select on its own table; every
         // further one is nested on an ALIAS of its table, so two conditions
@@ -1240,18 +1265,19 @@ class FhirDao<R extends FhirNode, T extends Object>
       parts.add(part);
     }
 
-    // The caller's own id set, ANDed with everything else. Small enough to
-    // bind, it is one more part, on the resources table; larger, the set
-    // path intersects it in Dart (_matchingIds), which is what a `_filter`
-    // over most of a type needs.
+    // The caller's own id set, ANDed with everything else, as one more
+    // part on the resources table: bound one value each while small, one
+    // JSON array past [maxIdListInSql] ([_idsIn]).
     if (only != null) {
-      if (only.length > maxIdListInSql) return null;
       final r = parts.isEmpty ? resources : alias(resources, nextAlias());
       parts.add(
         _IndexCondition(
           r,
           r.id,
-          r.resourceType.equals(resourceType) & r.id.isIn(only.toList()),
+          r.resourceType.equals(resourceType) &
+              (only.length > maxIdListInSql
+                  ? _idsIn(r, only)
+                  : r.id.isIn(only.toList())),
         ),
       );
     }
