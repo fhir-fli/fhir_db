@@ -1,5 +1,34 @@
 # fhir_db
 
+## [0.15.0]
+
+- **Every search shape but two is answered in SQL** (fhirant
+  REVIEW-2026-09-17 ST4, step 1 of 4). The Dart set path, which read every
+  matching id into memory, is now reached only for a token `:of-type` and
+  an `_id` list longer than 500. What moved, and what changed with it
+  (R4B search.html, read whole 2026-10-01):
+  - `_count=0` is an empty page (3.1.1.5.3). The set path returned every
+    match for it.
+  - `_id:missing` and `_lastUpdated:missing` are answered (every resource
+    has both). Any other modifier on `_id` or `_lastUpdated` is refused
+    (`UnsupportedSearchModifier`); `_id:not=x` used to answer x itself.
+  - `_list` and `_content` take no modifier (refused); `_text` takes the
+    string ones (`:exact`, `:contains`, `:missing`).
+  - A reference type modifier that names no resource type (`subject:Foo`)
+    is refused (3.1.1.4.4), where it answered as empty. With a typed
+    value, `subject:Patient=Patient/1` is that search and
+    `subject:Patient=Encounter/1` is empty.
+  - A chain on a parameter that is not a reference is empty (3.1.1.4.15).
+  - A chained parameter no target type defines, or an unknown parameter
+    inside `_has`, is ignored (3.1.1.3), as an unknown top-level parameter
+    is. The set path matched every target with it, which turned
+    `subject.nonsense=x` into "has any subject".
+  - `_has` naming a type the store has no definition for is empty.
+  - A `_sort` rule naming no parameter, or a composite or special one, is
+    dropped; the rules after it still apply (3.1.1.5.1).
+  - A number, quantity, date, uri, string, special or composite modifier
+    the builders have no meaning for is refused rather than passed on.
+
 ## [0.14.0]
 
 - **`purgeResourcesLastUpdatedBefore(type, cutoff)`** (fhirant
