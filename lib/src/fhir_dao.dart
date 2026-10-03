@@ -916,11 +916,6 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// REVIEW-2026-09-17 S3). Empty by default: every tag is a client's.
   Set<String> serverOwnedTags = {};
 
-  /// Whether the last [search] was paged in SQL (true) or resolved its ids
-  /// on the general path (false). For tests: a search that gives the right
-  /// answer on either path proves nothing about which one ran.
-  @visibleForTesting
-
   /// The ids of every resource [searchParameters], [hasParameters] and
   /// [compartment] match, and nothing else read. The same statement as
   /// [search], without the page or the hydration. With no parameters,
@@ -1045,8 +1040,6 @@ class FhirDao<R extends FhirNode, T extends Object>
         if (byId[id] case final r?) r,
     ];
   }
-
-  /// The requested slice of [items], given an offset and a count.
 
   /// The page of ids, cut in SQL, for any search: every parameter type,
   /// modifier, comma, repeat, chain, `_has`, `_sort`, compartment and id
@@ -1708,8 +1701,9 @@ class FhirDao<R extends FhirNode, T extends Object>
 
   /// One `_sort` rule as a join to the table holding its value, or null when
   /// the rule names nothing this path can sort by (a parameter of a type with
-  /// no value column, or an unknown parameter), which sends the search down
-  /// the general path.
+  /// no value column, or an unknown parameter); [_pagedIds] drops such a
+  /// rule (R4B search.html 3.1.1.5.1, read whole 2026-10-01: "Each item in
+  /// the comma separated list is a search parameter").
   ///
   /// `_id` and `_lastUpdated` join the resources table. A string sorts on its
   /// normalized column, which is lower-cased and accent-folded: §3.1.1.5.1,
@@ -2242,9 +2236,10 @@ class FhirDao<R extends FhirNode, T extends Object>
     );
   }
 
-  /// One parameter's typed WHERE on its own index table, or null when this
-  /// path has no builder for the parameter's type, the value does not parse
-  /// for it, or the modifier is one the general path alone handles.
+  /// One parameter's typed WHERE on its own index table. A value that does
+  /// not parse for the type throws (FormatException, turned into
+  /// [InvalidSearchValue] by [_conditionForKey]); a modifier no branch
+  /// gives a meaning is refused ([_refuseModifier]).
   ///
   /// Modifiers, R4B §3.1.1.4.4, by type:
   /// - any type: `:missing`. `true` is negated (no row with this path);
@@ -3101,17 +3096,11 @@ class FhirDao<R extends FhirNode, T extends Object>
     }
   }
 
-  /// The ids matching a search, without reading a single resource.
-  ///
-  /// Split out so `searchCount` can answer without hydrating: it used to call
-  /// `search` with no count and return `results.length`, which read and parsed
-  /// every match. Measured on 928,935 MIMIC resources, `Observation?status=
-  /// final`: 184.63s to count 813,513, against 10.54s for the same ids inside
-  /// `search`.
-  /// Those of [ids] that exist as a [resourceType] resource, read in
-  /// `IN (...)` chunks of [maxIdListInSql].
-
-  /// Get count of resources matching search parameters.
+  /// The number of resources a search matches, counted in SQL without
+  /// reading one. This used to call `search` with no count and return
+  /// `results.length`, which read and parsed every match: measured on
+  /// 928,935 MIMIC resources, `Observation?status=final`, 184.63s to count
+  /// 813,513.
   Future<int> searchCount({
     required T resourceType,
     Map<String, List<String>>? searchParameters,
@@ -3808,17 +3797,14 @@ class FhirDao<R extends FhirNode, T extends Object>
     return value;
   }
 
-  /// Determine the parameter type and dispatch to the appropriate search method.
-
   // ──────────────────────────────────────────────────────────────────────────
-  // Private: Individual search parameter type handlers
+  // Private: the WHERE for one value of each parameter type
   // ──────────────────────────────────────────────────────────────────────────
 
   /// The WHERE for one plain string value — the default match, R4 3.1.1.4.8:
   /// "equals or starts with the supplied parameter value, after both have
   /// been normalized by case and combining characters". `:exact` and
-  /// `:contains` are not built here; the SQL-paged path admits no modifier,
-  /// so they take the general path.
+  /// `:contains` are the string branch of [_conditionFor].
   Expression<bool> _stringCondition(
     String resourceType,
     String searchPath,
@@ -4099,13 +4085,6 @@ class FhirDao<R extends FhirNode, T extends Object>
     }
   }
 
-  /// Check if a resource's identifier field matches the :of-type criteria.
-  ///
-  /// Walks through the resource JSON to find identifier fields at the
-  /// given search path that have a matching type coding and value.
-
-  /// Check if a single Identifier JSON object matches the :of-type criteria.
-
   /// The WHERE for one date value with its prefix, or null when the value
   /// is not a search date.
   ///
@@ -4218,10 +4197,6 @@ class FhirDao<R extends FhirNode, T extends Object>
         return contained;
     }
   }
-
-  /// `_lastUpdated` reads `resources.last_updated`, an instant in
-  /// milliseconds, so the stored range is the point `[t, t + 1ms)`; the
-  /// prefix semantics are the same as for every other date parameter.
 
   /// The WHERE on `resources.last_updated` for one `_lastUpdated` value, or
   /// null when the value is not a search date.
@@ -4498,9 +4473,12 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// and `:below` apply only to URLs.
   static bool _isUrl(String value) => value.contains('://');
 
-  /// The WHERE for one plain uri value: exact match on the stored URI
-  /// (R4B 3.1.1.4.13 — "the search is case sensitive and accent sensitive",
-  /// with `:above` and `:below` as modifiers, which take the general path).
+  /// The WHERE for one plain uri value: exact match on the stored URI.
+  /// R4B search.html 3.1.1.4.9 (read whole 2026-10-01, verbatim): "By default,
+  /// matches are precise (e.g. case, accent, and escape) sensitive, and the
+  /// entire URI must match." `:above` and `:below` are the uri branch of
+  /// [_conditionFor]. (This used to cite 3.1.1.4.13 and a sentence that is
+  /// not on the page.)
   Expression<bool> _uriCondition(
     String resourceType,
     String searchPath,
@@ -4536,8 +4514,8 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// The WHERE for one plain reference value, `Type/id` or a bare `id`, as a
   /// typed expression. R4 3.1.1.4.12: `subject=Patient/23` names the type
   /// and the id; a bare `23` matches any type with that id. `:identifier`
-  /// and the type-as-modifier form are modifiers, which the SQL-paged path
-  /// does not admit, so they take the general path.
+  /// and the type-as-modifier form are the reference branch of
+  /// [_conditionFor].
   /// R4B 3.1.1.4.12: "Servers SHOULD reject a search where the logical id
   /// refers to more than one matching resource across different types."
   /// One indexed count of the types a bare id points at through this
@@ -4672,24 +4650,6 @@ class FhirDao<R extends FhirNode, T extends Object>
     return null;
   }
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // Private: Sorting helper
-  // ──────────────────────────────────────────────────────────────────────────
-
-  /// Orders hydrated resources for the general path, R4B §3.1.1.5.1.
-  ///
-  /// The keys come from the resources themselves, through the same extractor
-  /// that writes the index, so nothing is read back from the database (the
-  /// previous version queried each index table with `id IN (<every id>)`,
-  /// which SQLite caps at 32,766 variables, and compared numbers as
-  /// strings). "There can be multiple values for a given search parameter
-  /// for a single resource. In this case, the sort is based on the item in
-  /// the set of multiple parameters that comes earliest in the specified
-  /// sort order": the smallest value ascending, the largest descending. A
-  /// resource with no value sorts last; ties break on id.
-
-  /// One resource's key for one sort rule: the earliest of its values in the
-  /// rule's direction, typed so numbers and dates compare as themselves.
   /// The string rows that hold a whole value of their parameter, as
   /// opposed to one word of it: `param_index % 100 == 0`, the convention
   /// StringSearchParameters.paramIndex documents. Raw SQL because drift has
