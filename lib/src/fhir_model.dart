@@ -11,25 +11,30 @@ import 'package:fhir_path/fhir_path.dart';
 /// type name (`Patient`). The store itself reads resources through
 /// [FhirNode] navigation and never constructs one: everything that builds a
 /// value of the version's model goes through this class.
-abstract class FhirModel<R extends FhirNode, T extends Object> {
+abstract class FhirModel<R extends FhirNode, T extends Object>
+    extends ResourceModel<R> {
   /// Creates a model.
   const FhirModel();
 
   /// The version's FHIR version string, `4.3.0`.
+  @override
   String get fhirVersion;
 
   /// The resource type names of this version.
+  @override
   Set<String> get resourceTypeNames;
 
   /// The type token for [name], or null when the version has no such
   /// resource type.
   T? typeFromName(String name);
 
-  /// Parses a resource from its JSON text.
-  R fromJson(String json);
+  /// Parses a resource from its JSON text, as the store keeps it.
+  /// [ResourceModel.fromJson] takes the decoded map.
+  R fromJsonText(String json);
 
-  /// The JSON text of [resource].
-  String toJson(R resource);
+  /// The JSON text of [resource], as the store keeps it.
+  /// [ResourceModel.toJson] gives the map.
+  String toJsonText(R resource);
 
   /// Any element of the model as JSON (a Meta, a Period, a Timing): the
   /// store keeps a complex value as written in a few index columns.

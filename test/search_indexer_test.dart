@@ -8,7 +8,8 @@ import 'support/json_node.dart';
 void main() {
   final model = JsonModel();
   final indexer = SearchIndexer(model);
-  JsonNode node(String type, Object? value) => JsonNode(value, fhirType: type);
+  JsonNode node(String type, Object? value) =>
+      JsonNode(value, type, elementTypes: elementTypes);
 
   group('token', () {
     test('a Coding carries system, code and normalized display', () {
@@ -275,7 +276,7 @@ void main() {
 
     test('a nested resource is the reference to it (Bundle composition)', () {
       final rows = indexer.referenceRows(
-        JsonNode.resource({'resourceType': 'Composition', 'id': 'c1'}),
+        jsonResource({'resourceType': 'Composition', 'id': 'c1'}),
         'Bundle',
         'b1',
         0,
@@ -477,7 +478,7 @@ void main() {
     });
 
     test('a composite combines its components through the typed builders', () {
-      final observation = JsonNode.resource({
+      final observation = jsonResource({
         'resourceType': 'Observation',
         'id': 'o1',
         'code': {

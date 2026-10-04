@@ -169,7 +169,7 @@ class FhirDao<R extends FhirNode, T extends Object>
       );
     final resourceRow = await query.getSingleOrNull();
     if (resourceRow == null) return null;
-    return model.fromJson(resourceRow.resource);
+    return model.fromJsonText(resourceRow.resource);
   }
 
   /// The [resourceType] resources with these [ids] that exist, in id order,
@@ -195,7 +195,7 @@ class FhirDao<R extends FhirNode, T extends Object>
             ..orderBy([(tbl) => OrderingTerm.asc(tbl.id)]))
           .get();
       for (final row in rows) {
-        found.add(model.fromJson(row.resource));
+        found.add(model.fromJsonText(row.resource));
       }
     }
     return found;
@@ -503,7 +503,7 @@ class FhirDao<R extends FhirNode, T extends Object>
   ResourcesCompanion _currentRowFor(R r) => ResourcesCompanion(
         resourceType: Value(r.fhirType),
         id: Value(r.resourceId!),
-        resource: Value(model.toJson(r)),
+        resource: Value(model.toJsonText(r)),
         lastUpdated: Value(r.metaLastUpdated!.millisecondsSinceEpoch),
         versionId: Value(r.metaVersionId ?? '1'),
       );
@@ -682,7 +682,7 @@ class FhirDao<R extends FhirNode, T extends Object>
       ..where((tbl) => tbl.resourceType.equals(resourceTypeString))
       ..orderBy([(tbl) => OrderingTerm.desc(tbl.lastUpdated)]);
     final rows = await query.get();
-    return rows.map((row) => model.fromJson(row.resource)).toList();
+    return rows.map((row) => model.fromJsonText(row.resource)).toList();
   }
 
   /// Retrieve a paginated list of resources of a given type.
@@ -697,7 +697,7 @@ class FhirDao<R extends FhirNode, T extends Object>
       ..orderBy([(tbl) => OrderingTerm.desc(tbl.lastUpdated)])
       ..limit(count, offset: offset);
     final rows = await query.get();
-    return rows.map((row) => model.fromJson(row.resource)).toList();
+    return rows.map((row) => model.fromJsonText(row.resource)).toList();
   }
 
   /// Return a count of resources for a given type.
@@ -862,7 +862,7 @@ class FhirDao<R extends FhirNode, T extends Object>
           isUtc: true,
         ),
         deleted: false,
-        resource: model.fromJson(current.resource),
+        resource: model.fromJsonText(current.resource),
       );
     }
     final row = await (select(resourcesHistory)
@@ -3461,7 +3461,7 @@ class FhirDao<R extends FhirNode, T extends Object>
       SyncResourcesCompanion(
         resourceType: Value(resource.fhirType),
         id: Value(resource.resourceId!),
-        resource: Value(model.toJson(resource)),
+        resource: Value(model.toJsonText(resource)),
         lastUpdated: Value(
           resource.metaLastUpdated!.millisecondsSinceEpoch,
         ),
@@ -3473,7 +3473,7 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// Get all resources stored for sync.
   Future<List<R>> getSync() async {
     final rows = await select(syncResources).get();
-    return rows.map((r) => model.fromJson(r.resource)).toList();
+    return rows.map((r) => model.fromJsonText(r.resource)).toList();
   }
 
   /// Clear all sync resources.
@@ -3484,7 +3484,7 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// Watch sync resources for changes.
   Stream<List<R>> watchSync() {
     return select(syncResources).watch().map(
-          (rows) => rows.map((r) => model.fromJson(r.resource)).toList(),
+          (rows) => rows.map((r) => model.fromJsonText(r.resource)).toList(),
         );
   }
 
@@ -3512,7 +3512,10 @@ class FhirDao<R extends FhirNode, T extends Object>
     final query = select(canonicalResources)
       ..where((tbl) => tbl.resourceType.equals(type.toString()));
     final rows = await query.get();
-    return rows.map((r) => model.fromJson(r.resource)).whereType<C>().toList();
+    return rows
+        .map((r) => model.fromJsonText(r.resource))
+        .whereType<C>()
+        .toList();
   }
 
   /// Save a canonical resource to the cache, keyed by its `url`.
@@ -3521,7 +3524,7 @@ class FhirDao<R extends FhirNode, T extends Object>
       CanonicalResourcesCompanion(
         url: Value(resource.childValue('url') ?? ''),
         resourceType: Value(resource.fhirType),
-        resource: Value(model.toJson(resource)),
+        resource: Value(model.toJsonText(resource)),
       ),
     );
   }
@@ -3542,7 +3545,7 @@ class FhirDao<R extends FhirNode, T extends Object>
     }
 
     if (row == null) return null;
-    return model.fromJson(row.resource);
+    return model.fromJsonText(row.resource);
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -4792,7 +4795,7 @@ class HistoryEntry<R extends FhirNode> {
       lastUpdated:
           DateTime.fromMillisecondsSinceEpoch(row.lastUpdated, isUtc: true),
       deleted: deleted,
-      resource: deleted ? null : model.fromJson(row.resource),
+      resource: deleted ? null : model.fromJsonText(row.resource),
     );
   }
 

@@ -3,113 +3,12 @@ import 'dart:convert';
 import 'package:fhir_db/fhir_db.dart';
 import 'package:fhir_node/fhir_node.dart';
 
-/// A [FhirNode] over plain JSON, for the core's own tests: no FHIR version
-/// is linked. Type names come from `resourceType` for a resource and from
-/// a small table of element names for the complex types the index reads;
-/// primitives carry their JSON value as text.
-class JsonNode implements FhirNode {
-  JsonNode(this.value, {required this.fhirType});
+export 'package:fhir_node/fhir_node.dart' show JsonNode;
 
-  /// A resource from its JSON map.
-  factory JsonNode.resource(Map<String, dynamic> json) =>
-      JsonNode(json, fhirType: json['resourceType']! as String);
-
-  final Object? value;
-
-  @override
-  final String fhirType;
-
-  Map<String, dynamic> get map => value! as Map<String, dynamic>;
-
-  @override
-  bool get isPrimitive => value is! Map && value is! List;
-
-  @override
-  bool get isResource => value is Map && map.containsKey('resourceType');
-
-  @override
-  String? get primitiveValue => isPrimitive ? value?.toString() : null;
-
-  @override
-  bool hasType(List<String> names) =>
-      names.any((n) => n.toLowerCase() == fhirType.toLowerCase());
-
-  @override
-  bool isEmpty() => value == null;
-
-  @override
-  bool get isMetadataBased => false;
-
-  @override
-  bool equalsDeep(covariant FhirNode? other) =>
-      other is JsonNode && jsonEncode(value) == jsonEncode(other.value);
-
-  @override
-  List<String> listChildrenNames() =>
-      value is Map ? map.keys.toList() : const [];
-
-  @override
-  FhirNode? getChildByName(String name) {
-    final all = getChildrenByName(name);
-    return all.isEmpty ? null : all.first;
-  }
-
-  @override
-  List<FhirNode> getChildrenByName(String name, [bool checkValid = false]) {
-    if (value is! Map) return const [];
-    var v = map[name];
-    var type = v == null ? null : _childType(fhirType, name, v);
-    if (v == null) {
-      // A choice element: `value` finds `valueQuantity`, typed by its
-      // suffix, as the model's getChildrenByName does.
-      for (final key in map.keys) {
-        if (key.startsWith(name) &&
-            key.length > name.length &&
-            key[name.length].toUpperCase() == key[name.length]) {
-          v = map[key];
-          final suffix = key.substring(name.length);
-          type = _primitiveSuffixes.contains(suffix)
-              ? suffix[0].toLowerCase() + suffix.substring(1)
-              : suffix;
-          break;
-        }
-      }
-    }
-    if (v == null || type == null) return const [];
-    if (v is List) {
-      return [for (final e in v) JsonNode(e, fhirType: type)];
-    }
-    return [JsonNode(v, fhirType: type)];
-  }
-
-  static const _primitiveSuffixes = {
-    'String',
-    'Integer',
-    'Boolean',
-    'DateTime',
-    'Date',
-    'Decimal',
-    'Time',
-    'Instant',
-    'Uri',
-    'Code',
-  };
-
-  /// The FHIR type of child [name] of a [parent] type, from the element
-  /// table below; a nested map with `resourceType` is that resource.
-  static String _childType(String parent, String name, Object? v) {
-    if (v is Map && v['resourceType'] is String) {
-      return v['resourceType'] as String;
-    }
-    if (v is List &&
-        v.isNotEmpty &&
-        v.first is Map &&
-        (v.first as Map)['resourceType'] is String) {
-      return (v.first as Map)['resourceType'] as String;
-    }
-    return elementTypes['$parent.$name'] ?? elementTypes['*.$name'] ?? 'string';
-  }
-}
+/// A resource over [elementTypes], so its children carry the types the
+/// indexer reads.
+JsonNode jsonResource(Map<String, dynamic> json) =>
+    JsonNode.resource(json, elementTypes: elementTypes);
 
 /// Element → FHIR type, for what the tests exercise.
 const elementTypes = <String, String>{
@@ -227,26 +126,33 @@ class JsonModel extends FhirModel<JsonNode, String> {
       resourceTypeNames.contains(name) ? name : null;
 
   @override
-  JsonNode fromJson(String json) =>
-      JsonNode.resource(jsonDecode(json) as Map<String, dynamic>);
+  JsonNode fromJsonText(String json) =>
+      fromJson(jsonDecode(json) as Map<String, dynamic>);
 
   @override
-  String toJson(JsonNode resource) => jsonEncode(resource.value);
+  String toJsonText(JsonNode resource) => jsonEncode(resource.value);
+
+  @override
+  JsonNode fromJson(Map<String, dynamic> json) =>
+      JsonNode.resource(json, elementTypes: elementTypes);
+
+  @override
+  Map<String, dynamic> toJson(JsonNode resource) => resource.json;
 
   @override
   Map<String, dynamic> jsonOf(FhirNode element) =>
-      Map<String, dynamic>.from((element as JsonNode).map);
+      Map<String, dynamic>.from((element as JsonNode).json);
 
   @override
   String jsonText(FhirNode element) => jsonEncode((element as JsonNode).value);
 
   @override
   JsonNode withId(JsonNode resource, String id) =>
-      JsonNode.resource({...resource.map, 'id': id});
+      fromJson({...resource.json, 'id': id});
 
   @override
   JsonNode withMeta(JsonNode resource, Map<String, dynamic> meta) =>
-      JsonNode.resource({...resource.map, 'meta': meta});
+      fromJson({...resource.json, 'meta': meta});
 
   @override
   Map<String, Map<String, List<String>>> get compartmentDefinitions => const {

@@ -74,7 +74,7 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
     final engine = model.createFhirPathEngine(
       IndexHostServices((type, id) {
         try {
-          return model.fromJson('{"resourceType":"$type","id":"$id"}');
+          return model.fromJsonText('{"resourceType":"$type","id":"$id"}');
         } on Object catch (e) {
           // A type whose constructor requires more than an id (Group needs
           // type and actual) cannot be stubbed from a reference string. The
@@ -99,7 +99,7 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
         .get();
     for (final row in rows) {
       try {
-        registry.add(model.fromJson(row.resource));
+        registry.add(model.fromJsonText(row.resource));
       } on Object catch (e) {
         // Stored before validation existed, or under a model that had no
         // engine: kept in the store, indexed by nothing, and named here so
@@ -647,7 +647,7 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
   ) async {
     R resource;
     try {
-      resource = model.fromJson(json);
+      resource = model.fromJsonText(json);
     } on Object catch (_) {
       // Whatever the model's parser throws for a row it cannot read.
       return;

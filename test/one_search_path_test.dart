@@ -21,7 +21,7 @@ void main() {
     const families = [('p1', 'Alpha'), ('p2', 'Beta'), ('p3', 'Gamma')];
     for (final (id, family) in families) {
       await dao.saveResource(
-        JsonNode.resource({
+        jsonResource({
           'resourceType': 'Patient',
           'id': id,
           'name': [
@@ -34,7 +34,7 @@ void main() {
     // o1 and o2 point at p1 and p2; o3 has no subject at all.
     for (final (id, subject) in [('o1', 'p1'), ('o2', 'p2'), ('o3', null)]) {
       await dao.saveResource(
-        JsonNode.resource({
+        jsonResource({
           'resourceType': 'Observation',
           'id': id,
           'status': 'final',
@@ -279,7 +279,7 @@ void main() {
     // An id holding the characters JSON and SQL quote, so the literal has
     // to be escaped twice over.
     await dao.saveResource(
-      JsonNode.resource({
+      jsonResource({
         'resourceType': 'Patient',
         'id': "q'uo\"te",
       }),
@@ -319,7 +319,7 @@ void main() {
     // match. All 3 parts must be present". The set path read every
     // candidate resource to look at its identifier types.
     await dao.saveResource(
-      JsonNode.resource({
+      jsonResource({
         'resourceType': 'Patient',
         'id': 'typed',
         'identifier': [
