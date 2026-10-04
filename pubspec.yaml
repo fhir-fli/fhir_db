@@ -36,7 +36,7 @@ dependencies:
   collection: ^1.19.1
   crypto: ^3.0.7
   drift: ^2.33.0
-  fhir_node: ^0.6.0
+  fhir_node: ^0.6.1
   fhir_path: ^0.14.2
   meta: ^1.16.0
   sqlite3: ^3.1.5

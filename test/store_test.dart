@@ -20,7 +20,7 @@ void main() {
   tearDown(() => db.close());
 
   JsonNode patient(String id, {String family = 'Smith', String? gender}) =>
-      JsonNode.resource({
+      jsonResource({
         'resourceType': 'Patient',
         'id': id,
         'name': [
@@ -37,7 +37,7 @@ void main() {
       });
 
   JsonNode observation(String id, String patient, {double value = 120}) =>
-      JsonNode.resource({
+      jsonResource({
         'resourceType': 'Observation',
         'id': id,
         'status': 'final',
@@ -66,7 +66,7 @@ void main() {
 
   test('create stamps meta and assigns an id when there is none', () async {
     final saved = await dao.saveResource(
-      JsonNode.resource({
+      jsonResource({
         'resourceType': 'Patient',
         'name': [
           {'family': 'X'},
@@ -77,7 +77,7 @@ void main() {
     expect(saved.metaVersionId, '1');
     expect(saved.metaLastUpdated, isNotNull);
     final read = await dao.getResource('Patient', saved.resourceId!);
-    expect(read!.map['name'], [
+    expect(read!.json['name'], [
       {'family': 'X'},
     ]);
   });
@@ -88,15 +88,15 @@ void main() {
     // write that tag: a server decision keyed on a field a client writes.
     const owned = {'system': 'urn:server', 'code': 'owned'};
     const other = {'system': 't', 'code': 'other'};
-    JsonNode tagged(String id, List<Map<String, String>> tags) =>
-        JsonNode.resource({
-          ...patient(id).map,
+    JsonNode tagged(String id, List<Map<String, String>> tags) => jsonResource({
+          ...patient(id).json,
           'meta': {'tag': tags},
         });
     const ownedQuery = {
       '_tag': ['urn:server|owned'],
     };
-    List<dynamic>? tagsOf(JsonNode n) => (n.map['meta'] as Map)['tag'] as List?;
+    List<dynamic>? tagsOf(JsonNode n) =>
+        (n.json['meta'] as Map)['tag'] as List?;
 
     setUp(() => dao.serverOwnedTags = {'urn:server|owned'});
 
@@ -147,8 +147,8 @@ void main() {
   test('update counts the version, merges tags, moves the old row to history',
       () async {
     await dao.saveResource(
-      JsonNode.resource({
-        ...patient('p1').map,
+      jsonResource({
+        ...patient('p1').json,
         'meta': {
           'tag': [
             {'system': 't', 'code': 'kept'},
@@ -157,8 +157,8 @@ void main() {
       }),
     );
     final v2 = await dao.saveResource(
-      JsonNode.resource({
-        ...patient('p1', family: 'Jones').map,
+      jsonResource({
+        ...patient('p1', family: 'Jones').json,
         'meta': {
           'tag': [
             {'system': 't', 'code': 'new'},
@@ -168,7 +168,7 @@ void main() {
     );
     expect(v2.metaVersionId, '2');
     expect(
-      (v2.map['meta'] as Map)['tag'],
+      (v2.json['meta'] as Map)['tag'],
       [
         {'system': 't', 'code': 'kept'},
         {'system': 't', 'code': 'new'},
@@ -176,7 +176,7 @@ void main() {
     );
     final history = await dao.getHistory('Patient', 'p1');
     expect(history.map((h) => h.versionId), ['2', '1']);
-    expect(history.last.resource!.map['name'], [
+    expect(history.last.resource!.json['name'], [
       {
         'family': 'Smith',
         'given': ['Ann'],
@@ -217,7 +217,7 @@ void main() {
     await dao.saveResource(observation('o1', 'a'));
     await dao.saveResource(observation('o2', 'b', value: 80));
     await dao.saveResource(
-      JsonNode.resource(
+      jsonResource(
         {'resourceType': 'ValueSet', 'id': 'vs', 'url': 'http://x/vs'},
       ),
     );
@@ -397,7 +397,7 @@ void main() {
   test(':in expands a stored ValueSet by compose.include and exclude',
       () async {
     await dao.saveResource(
-      JsonNode.resource({
+      jsonResource({
         'resourceType': 'ValueSet',
         'id': 'vs',
         'url': 'http://x/vs',
@@ -441,7 +441,7 @@ void main() {
   test('a contained resource is indexed under #Type and found by chain',
       () async {
     await dao.saveResource(
-      JsonNode.resource({
+      jsonResource({
         'resourceType': 'Observation',
         'id': 'oc',
         'status': 'final',

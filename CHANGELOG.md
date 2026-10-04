@@ -2,6 +2,11 @@
 
 ## [0.15.0]
 
+- `FhirModel<R, T>` extends fhir_node 0.6.1's `ResourceModel<R>`: a binding
+  now gives `fromJson(Map)` / `toJson(R)` (the map) as well as the store's
+  text pair, renamed `fromJsonText` / `toJsonText`. The tests' JSON node is
+  fhir_node's `JsonNode` with this package's element-type table.
+
 - **Every search shape but two is answered in SQL** (fhirant
   REVIEW-2026-09-17 ST4, step 1 of 4). The Dart set path, which read every
   matching id into memory, is now reached only for a token `:of-type` and
