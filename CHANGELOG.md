@@ -2,6 +2,8 @@
 
 ## [0.15.0]
 
+- Depends on `fhir_path` ^0.15.0 (0.14.2 was never published; the
+  constraint did not admit the 0.15.0 the bindings use).
 - **A fetched resource can keep its server's `meta`**: `saveResource` and
   `saveResources` take `preserveMeta`. When it is set and the resource
   carries a `meta.lastUpdated`, the meta is stored exactly as received —
