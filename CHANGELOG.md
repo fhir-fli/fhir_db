@@ -2,6 +2,18 @@
 
 ## [0.15.0]
 
+- **A fetched resource can keep its server's `meta`**: `saveResource` and
+  `saveResources` take `preserveMeta`. When it is set and the resource
+  carries a `meta.lastUpdated`, the meta is stored exactly as received —
+  versionId, lastUpdated, tags — instead of being stamped with this store's
+  time and next version. For a client caching another server's resources,
+  the stamp made every cached row show the time of the last sync, and a
+  newer remote edit lost a "which is newer?" comparison to a local write
+  time. Off by default; a resource with no `lastUpdated` is versioned as
+  before. Proposed and first implemented by **xtMartinEberl** against
+  fhir_r4_db 0.12.0 (fhir-fli/fhir_r4 issue #39, PR #40, 2026-09-17); the
+  save code had since moved here, so it lands in the core and every binding
+  inherits it. `test/preserve_meta_test.dart`.
 - `FhirModel<R, T>` extends fhir_node 0.6.1's `ResourceModel<R>`: a binding
   now gives `fromJson(Map)` / `toJson(R)` (the map) as well as the store's
   text pair, renamed `fromJsonText` / `toJsonText`. The tests' JSON node is
