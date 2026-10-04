@@ -219,11 +219,23 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// The meta written is the submitted one with the server's versionId and
   /// lastUpdated, and, with [mergeTags], the stored tags and security labels
   /// kept alongside the submitted ones; see [_nextMeta].
+  ///
+  /// [preserveMeta] is for a resource FETCHED from another server and stored
+  /// as a copy: its `meta` is written exactly as received when it carries a
+  /// `lastUpdated`, so the copy says when that server last changed the
+  /// resource and which version it was, not when this store wrote it. A
+  /// resource with no `lastUpdated` is versioned as usual. Proposed in
+  /// fhir-fli/fhir_r4 issue #39 / PR #40 (xtMartinEberl, 2026-09-17): a
+  /// cache that stamped every row with the sync time showed today's date on
+  /// every completed QuestionnaireResponse, and a newer remote edit lost
+  /// to a local write time. Off by default; the stamping above is the
+  /// right behaviour for a resource this store's caller authored.
   Future<R> saveResource(
     R resource, {
     String? ifMatchVersion,
     bool mergeTags = true,
     bool asServer = false,
+    bool preserveMeta = false,
   }) async {
     final withId = _withIdIfNone(resource);
     final id = withId.resourceId!;
@@ -242,15 +254,17 @@ class FhirDao<R extends FhirNode, T extends Object>
       }
       final existingMeta =
           existingRow == null ? null : _metaJsonOfText(existingRow.resource);
-      final updated = model.withMeta(
-        withId,
-        _nextMeta(
-          _metaJsonOf(withId),
-          existingMeta,
-          mergeTags: mergeTags,
-          asServer: asServer,
-        ),
-      );
+      final updated = _keepsMeta(withId, preserveMeta)
+          ? withId
+          : model.withMeta(
+              withId,
+              _nextMeta(
+                _metaJsonOf(withId),
+                existingMeta,
+                mergeTags: mergeTags,
+                asServer: asServer,
+              ),
+            );
       // The row, the superseded version's move into history and the index
       // rows go in together. A failure part way used to leave a resource
       // stored that no search could find, with the caller told it had
@@ -295,9 +309,12 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// that: 4,212 conformance resources whose first version was a second
   /// 48 MB copy of the same JSON (fhirant REVIEW-2026-09-06 §6.1); now no
   /// first version is copied.
+  ///
+  /// [preserveMeta] as in [saveResource].
   Future<bool> saveResources(
     List<R> resourcesList, {
     bool asServer = false,
+    bool preserveMeta = false,
   }) async {
     if (resourcesList.isEmpty) return true;
     await _ready();
@@ -314,15 +331,17 @@ class FhirDao<R extends FhirNode, T extends Object>
         final historyRows = <ResourcesHistoryCompanion>[];
         for (final resource in withIds) {
           final key = '${resource.fhirType}/${resource.resourceId!}';
-          final updated = model.withMeta(
-            resource,
-            _nextMeta(
-              _metaJsonOf(resource),
-              metas[key],
-              mergeTags: true,
-              asServer: asServer,
-            ),
-          );
+          final updated = _keepsMeta(resource, preserveMeta)
+              ? resource
+              : model.withMeta(
+                  resource,
+                  _nextMeta(
+                    _metaJsonOf(resource),
+                    metas[key],
+                    mergeTags: true,
+                    asServer: asServer,
+                  ),
+                );
           metas[key] = _metaJsonOf(updated);
           newResources.add(updated);
           // The version this one replaces: the stored row the first time
@@ -377,6 +396,11 @@ class FhirDao<R extends FhirNode, T extends Object>
       return false;
     }
   }
+
+  /// Whether [resource] is stored with its meta as received: the caller
+  /// asked ([preserveMeta]) and there is a `lastUpdated` to keep.
+  bool _keepsMeta(R resource, bool preserveMeta) =>
+      preserveMeta && resource.metaLastUpdated != null;
 
   /// The meta a new version is written with.
   ///
