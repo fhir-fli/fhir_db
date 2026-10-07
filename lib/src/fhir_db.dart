@@ -1,4 +1,5 @@
 import 'package:drift/drift.dart';
+import 'package:fhir_db/src/cipher_from_key.dart';
 import 'package:fhir_db/src/fhir_dao.dart';
 import 'package:fhir_db/src/fhir_model.dart';
 import 'package:fhir_db/src/search/contained_index.dart';
@@ -47,6 +48,49 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
 
   /// The row builders over [model].
   late final SearchIndexer indexer = SearchIndexer(model);
+
+  /// Changes the key the store file is encrypted under to [newHexKey], a
+  /// raw 32-byte key as 64 hex digits, the form [cipherSetup] opens with
+  /// (`deriveDbKey` makes one from a password and the store's salt).
+  ///
+  /// SQLite3 Multiple Ciphers, SQL Pragmas (read whole 2026-10-06):
+  /// "PRAGMA rekey" changes "the encryption key of an existing encrypted
+  /// database"; "Rekeying is now supported in WAL mode for already
+  /// encrypted databases". The connection must already be open under the
+  /// current key. An empty key would strip the encryption ("To remove the
+  /// encryption from a database the PRAGMA rekey statement is executed
+  /// with an empty passphrase"), so it is refused here; removing the
+  /// encryption is not something this store does.
+  ///
+  /// The Hive store had `updatePw`; the Drift rewrite of 2026-02-25 had no
+  /// replacement until 2026-10-06.
+  Future<void> rekey(String newHexKey) async {
+    if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(newHexKey)) {
+      throw ArgumentError.value(
+        newHexKey,
+        'newHexKey',
+        'must be 64 hex digits (a raw 32-byte key)',
+      );
+    }
+    await customStatement("PRAGMA rekey = \"x'$newHexKey'\";");
+  }
+
+  /// [rekey] with a key derived from [newPassword] and the salt beside the
+  /// store at [dbPath], the way `deriveDbKey` derives the opening key.
+  Future<void> rekeyWithPassword({
+    required String newPassword,
+    required String dbPath,
+  }) async {
+    final hexKey = await deriveDbKey(password: newPassword, dbPath: dbPath);
+    if (hexKey == null) {
+      throw ArgumentError.value(
+        newPassword,
+        'newPassword',
+        'must not be empty',
+      );
+    }
+    await rekey(hexKey);
+  }
 
   Future<CustomSearchParameters?>? _customSearchParameters;
   CustomSearchParameters? _customLoaded;
