@@ -1,5 +1,9 @@
 # fhir_db
 
+## [Unreleased]
+
+- **`FhirDb.rekey(newHexKey)` and `rekeyWithPassword(newPassword:, dbPath:)`: the store's key can be changed again.** The Hive store had `updatePw`; measured 2026-10-06, the Drift rewrite (2026-02-25) carried no replacement (0 sites for `rekey`, `changeKey` or `PRAGMA rekey` across fhir_db and the three bindings), so a leaked password could not be rotated without export and reload. `PRAGMA rekey` (SQLite3 Multiple Ciphers, SQL Pragmas) on the open connection; an empty key, which would strip the encryption, and anything but 64 hex digits are refused. Tests open a SQLCipher file store, prove a wrong key cannot read it, rekey, and reopen with the new key only.
+
 ## [0.15.0]
 
 - Depends on `fhir_path` ^0.15.0 (0.14.2 was never published; the
