@@ -1,5 +1,15 @@
 # fhir_db
 
+## [0.15.1]
+
+- **The store's encryption key can be changed** (#16): `FhirDb.rekey(newHexKey)`
+  (SQLCipher `PRAGMA rekey` with a 64-hex-digit raw key; an empty or
+  malformed key is refused) and `rekeyWithPassword(newPassword:, dbPath:)`,
+  which derives the key the way the store was opened. Tested on an
+  encrypted file store: after a rekey the old key cannot open it and the
+  new one reads every resource.
+- PBKDF2 known-answer tests from an independent implementation (#15).
+
 ## [0.15.0]
 
 - Depends on `fhir_path` ^0.15.0 (0.14.2 was never published; the
