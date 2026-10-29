@@ -288,11 +288,12 @@ class FhirDao<R extends FhirNode, T extends Object>
     return newResource;
   }
 
-  /// Save many resources as one transaction.
+  /// Saves many resources as one transaction and returns them as stored
+  /// (server-assigned version and lastUpdated), in the order given.
   ///
   /// Every row and every index row commits together or not at all: a failure
   /// part way (an index row that will not insert, a resource that will not
-  /// serialize) returns false and leaves the database as it was. The rows
+  /// serialize) is thrown and leaves the database as it was. The rows
   /// and the index rows used to be two separate batches, so an indexing
   /// failure left the resources stored and unsearchable behind the `false`
   /// (fhirant REVIEW-2026-09-06 finding 27).
@@ -311,6 +312,95 @@ class FhirDao<R extends FhirNode, T extends Object>
   /// first version is copied.
   ///
   /// [preserveMeta] as in [saveResource].
+  ///
+  /// The store work is a handful of statements for the whole list (the
+  /// stored rows, one query per resource type; one batch of rows and
+  /// history; one batch of index rows), where [saveResource] makes about
+  /// five per resource. Measured 2026-10-28 (fhirant
+  /// `tool/review_2026-10-17/round_trip_probe.tsv`), 2,000 Observations:
+  /// one at a time inside one transaction 0.9-1.5 s with SQLite on the
+  /// caller's isolate and 1.5-1.9 s on a background isolate; through this,
+  /// 0.38-0.41 s and 0.56-1.23 s.
+  Future<List<R>> saveResourceList(
+    List<R> resourcesList, {
+    bool asServer = false,
+    bool preserveMeta = false,
+  }) async {
+    if (resourcesList.isEmpty) return const [];
+    await _ready();
+    if (!asServer) resourcesList.forEach(_validateIfSearchParameter);
+    final newResources = <R>[];
+    await transaction(() async {
+      final withIds = [for (final r in resourcesList) _withIdIfNone(r)];
+      final stored = await _storedRows(withIds);
+      final metas = <String, Map<String, dynamic>?>{
+        for (final e in stored.entries) e.key: e.value.meta,
+      };
+      final currentRows = <ResourcesCompanion>[];
+      final historyRows = <ResourcesHistoryCompanion>[];
+      for (final resource in withIds) {
+        final key = '${resource.fhirType}/${resource.resourceId!}';
+        final updated = _keepsMeta(resource, preserveMeta)
+            ? resource
+            : model.withMeta(
+                resource,
+                _nextMeta(
+                  _metaJsonOf(resource),
+                  metas[key],
+                  mergeTags: true,
+                  asServer: asServer,
+                ),
+              );
+        metas[key] = _metaJsonOf(updated);
+        newResources.add(updated);
+        // The version this one replaces: the stored row the first time
+        // the resource appears in the batch, the batch's own previous
+        // version after that.
+        final previous = stored.remove(key)?.history;
+        if (previous != null) {
+          historyRows.add(previous);
+        } else {
+          final earlier = currentRows.lastWhere(
+            (c) =>
+                c.resourceType.value == resource.fhirType &&
+                c.id.value == resource.resourceId,
+            orElse: () => const ResourcesCompanion(),
+          );
+          if (earlier.id.present) historyRows.add(_historyRowOf(earlier));
+        }
+        currentRows.add(_currentRowFor(updated));
+      }
+      await batch(
+        (b) => b
+          ..insertAllOnConflictUpdate(resources, currentRows)
+          ..insertAllOnConflictUpdate(resourcesHistory, historyRows),
+      );
+      await _updateSearchParametersBulk(newResources);
+    });
+
+    if (storeForSync) {
+      for (final r in newResources) {
+        await _saveToSync(r);
+      }
+    }
+
+    // A bulk save is how a table grows by orders of magnitude between
+    // opens. Statistics gathered when the tables were empty (or 10-fold
+    // smaller) send the planner down the wrong index; measured 2026-09-06,
+    // 58s for a 0.23s query. `PRAGMA optimize` runs ANALYZE only when that
+    // has happened, so on the many batches of one load almost every call
+    // is a no-op. See FhirDb.ensurePlannerStatistics.
+    await customStatement('PRAGMA optimize=0x10002');
+    if (resourcesList.any((r) => r.fhirType == 'SearchParameter')) {
+      await _reloadIfSearchParameter('SearchParameter');
+    }
+    return newResources;
+  }
+
+  /// [saveResourceList], answering false for a store or index failure
+  /// instead of throwing it; the failure is printed to stderr and the
+  /// database is left as it was. An invalid SearchParameter is thrown
+  /// before anything runs, as it always was.
   Future<bool> saveResources(
     List<R> resourcesList, {
     bool asServer = false,
@@ -320,72 +410,11 @@ class FhirDao<R extends FhirNode, T extends Object>
     await _ready();
     if (!asServer) resourcesList.forEach(_validateIfSearchParameter);
     try {
-      final newResources = <R>[];
-      await transaction(() async {
-        final withIds = [for (final r in resourcesList) _withIdIfNone(r)];
-        final stored = await _storedRows(withIds);
-        final metas = <String, Map<String, dynamic>?>{
-          for (final e in stored.entries) e.key: e.value.meta,
-        };
-        final currentRows = <ResourcesCompanion>[];
-        final historyRows = <ResourcesHistoryCompanion>[];
-        for (final resource in withIds) {
-          final key = '${resource.fhirType}/${resource.resourceId!}';
-          final updated = _keepsMeta(resource, preserveMeta)
-              ? resource
-              : model.withMeta(
-                  resource,
-                  _nextMeta(
-                    _metaJsonOf(resource),
-                    metas[key],
-                    mergeTags: true,
-                    asServer: asServer,
-                  ),
-                );
-          metas[key] = _metaJsonOf(updated);
-          newResources.add(updated);
-          // The version this one replaces: the stored row the first time
-          // the resource appears in the batch, the batch's own previous
-          // version after that.
-          final previous = stored.remove(key)?.history;
-          if (previous != null) {
-            historyRows.add(previous);
-          } else {
-            final earlier = currentRows.lastWhere(
-              (c) =>
-                  c.resourceType.value == resource.fhirType &&
-                  c.id.value == resource.resourceId,
-              orElse: () => const ResourcesCompanion(),
-            );
-            if (earlier.id.present) historyRows.add(_historyRowOf(earlier));
-          }
-          currentRows.add(_currentRowFor(updated));
-        }
-        await batch(
-          (b) => b
-            ..insertAllOnConflictUpdate(resources, currentRows)
-            ..insertAllOnConflictUpdate(resourcesHistory, historyRows),
-        );
-        await _updateSearchParametersBulk(newResources);
-      });
-
-      if (storeForSync) {
-        for (final r in newResources) {
-          await _saveToSync(r);
-        }
-      }
-
-      // A bulk save is how a table grows by orders of magnitude between
-      // opens. Statistics gathered when the tables were empty (or 10-fold
-      // smaller) send the planner down the wrong index; measured 2026-09-06,
-      // 58s for a 0.23s query. `PRAGMA optimize` runs ANALYZE only when that
-      // has happened, so on the many batches of one load almost every call
-      // is a no-op. See FhirDb.ensurePlannerStatistics.
-      await customStatement('PRAGMA optimize=0x10002');
-      if (resourcesList.any((r) => r.fhirType == 'SearchParameter')) {
-        await _reloadIfSearchParameter('SearchParameter');
-      }
-
+      await saveResourceList(
+        resourcesList,
+        asServer: asServer,
+        preserveMeta: preserveMeta,
+      );
       return true;
     } on Object catch (e) {
       // Any failure inside the batch, a store error or an index extractor
