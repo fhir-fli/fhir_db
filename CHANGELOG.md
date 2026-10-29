@@ -1,5 +1,14 @@
 # fhir_db
 
+## [0.15.2]
+
+- **`FhirDao.saveResourceList`** saves many resources in one transaction
+  and returns them as stored (version, lastUpdated), in the order given,
+  throwing on failure with nothing stored. It stores the rows and index
+  rows `saveResource` would, in a handful of statements for the whole
+  list instead of about five per resource. `saveResources` is now this,
+  answering false for a store or index failure as before.
+
 ## [0.15.1]
 
 - **The store's encryption key can be changed** (#16): `FhirDb.rekey(newHexKey)`
