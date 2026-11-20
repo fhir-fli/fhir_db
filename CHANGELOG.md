@@ -1,5 +1,15 @@
 # fhir_db
 
+## [0.15.4]
+
+- **`_since` on a resource's history keeps a version saved at the instant
+  it names.** R4B http.html §3.1.0.12: "Only include resource versions
+  that were created at or after the given instant in time". `getHistory`
+  and `countHistory` compared `last_updated > since`; measured
+  2026-11-19, `getHistory(since: v.lastUpdated)` returned nothing for the
+  version `v` itself (test `_since keeps a version saved at the instant it
+  names`, failing before the change).
+
 ## [0.15.3]
 
 - **Version stamps only go forward.** `meta.lastUpdated` on a save, a

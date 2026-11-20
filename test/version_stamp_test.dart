@@ -119,6 +119,14 @@ void main() {
     await second.close();
   });
 
+  test('_since keeps a version saved at the instant it names', () async {
+    // R4B http.html §3.1.0.12: "created at or after the given instant".
+    final saved = await dao.saveResource(patient('a'));
+    final history =
+        await dao.getHistory('Patient', 'a', since: saved.metaLastUpdated);
+    expect(history, hasLength(1));
+  });
+
   test('a preserved meta keeps its own time and takes no stamp', () async {
     final kept = await dao.saveResource(
       JsonNode.resource({

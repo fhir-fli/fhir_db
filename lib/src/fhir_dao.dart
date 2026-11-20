@@ -856,7 +856,11 @@ class FhirDao<R extends FhirNode, T extends Object>
     final time = at != null
         ? 'AND last_updated <= ? '
         : since != null
-            ? 'AND last_updated > ? '
+            // R4B http.html §3.1.0.12 (read 2026-11-19): `_since` is "Only
+            // include resource versions that were created at or after the
+            // given instant in time". It was `>`, so a version saved in the
+            // millisecond a reader's cursor names was never returned.
+            ? 'AND last_updated >= ? '
             : '';
     return 'SELECT resource_type, id, version_id, resource, last_updated, '
         'deleted FROM resources_history '
