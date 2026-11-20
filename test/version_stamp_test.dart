@@ -138,4 +138,22 @@ void main() {
     );
     expect(kept.metaLastUpdated, DateTime.utc(2026, 9, 8, 10, 1, 21));
   });
+  test(
+      "a peer's future time saved with preserveMeta does not carry this "
+      "store's stamps forward", () async {
+    // The copy keeps the peer's time; the store's own clock starts from
+    // what the store itself stamped. Measured 2026-11-20 before the fix: a
+    // preserved 2099 row as a fresh store's first write made every later
+    // local save 2099-01-01 00:00:00.000001Z.
+    await dao.saveResource(
+      JsonNode.resource({
+        'resourceType': 'Patient',
+        'id': 'fetched',
+        'meta': {'versionId': '3', 'lastUpdated': '2099-01-01T00:00:00Z'},
+      }),
+      preserveMeta: true,
+    );
+    final saved = await dao.saveResource(patient('local'));
+    expect(saved.metaLastUpdated!.isBefore(ahead), isTrue);
+  });
 }

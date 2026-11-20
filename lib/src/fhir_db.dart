@@ -187,7 +187,7 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
   /// the clock, 68 with a statement per resource).
   Future<List<DateTime>> versionStamps(int count) async {
     if (count < 1) return const [];
-    await (_storeClockReady ??= _createStoreClock());
+    await startStoreClock();
     final now = DateTime.now().toUtc().microsecondsSinceEpoch;
     final row = await customWriteReturning(
       'INSERT INTO store_clock (id, last_stamp) VALUES (0, ?) '
@@ -202,6 +202,13 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
         DateTime.fromMicrosecondsSinceEpoch(last - i, isUtc: true),
     ];
   }
+
+  /// Creates and starts the clock if the store has none yet. A save that
+  /// keeps a fetched resource's own time (`preserveMeta`) calls it before
+  /// writing, so the clock starts from what this store stamped, not from a
+  /// peer's time: a preserved 2099 row as a fresh store's first write made
+  /// every later local save 2099 (measured 2026-11-20).
+  Future<void> startStoreClock() => _storeClockReady ??= _createStoreClock();
 
   Future<void> _createStoreClock() async {
     await customStatement(
