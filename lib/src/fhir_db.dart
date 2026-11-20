@@ -157,6 +157,67 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
   /// The data-access object over this database.
   late final FhirDao<R, T> fhirDao = FhirDao<R, T>(this);
 
+  Future<void>? _storeClockReady;
+
+  /// The time to stamp on a version this store saves, as `meta.lastUpdated`:
+  /// this machine's clock, or, when that reads no later than the last stamp
+  /// this store gave, one microsecond after it. A store's stamps therefore
+  /// only go forward, even when the clock is set back.
+  ///
+  /// Why: a history read with `_since` (R4B http.html §3.1.0.12, read
+  /// 2026-11-19: "Only include resource versions that were created at or
+  /// after the given instant in time") is how another system follows this
+  /// store's changes, and a version stamped before one already read is
+  /// never returned to it. The spec says nothing about clocks; Google's
+  /// Android FHIR SDK keeps the same kind of time cursor
+  /// (ResourceParamsBasedDownloadWorkManager, android-fhir 28a5034) and
+  /// CouchDB's change feed avoids times by counting
+  /// (docs.couchdb.org, `_changes`, `since`). This keeps the time and gives
+  /// it the count's one property that matters here: it never goes back.
+  ///
+  /// The last stamp is kept in `store_clock`, created on first use (so a
+  /// subclass with its own [migration] needs no step for it) and started at
+  /// the latest `last_updated` already stored. Call it inside the
+  /// transaction that saves the version.
+  Future<DateTime> versionStamp() async => (await versionStamps(1)).single;
+
+  /// [count] stamps as [versionStamp] gives one, one microsecond apart, in
+  /// one statement: a batch save takes one, not one per resource (measured
+  /// 2026-11-19, fhirant's fifty-create transaction: 18 statements before
+  /// the clock, 68 with a statement per resource).
+  Future<List<DateTime>> versionStamps(int count) async {
+    if (count < 1) return const [];
+    await (_storeClockReady ??= _createStoreClock());
+    final now = DateTime.now().toUtc().microsecondsSinceEpoch;
+    final row = await customWriteReturning(
+      'INSERT INTO store_clock (id, last_stamp) VALUES (0, ?) '
+      'ON CONFLICT (id) DO UPDATE SET '
+      'last_stamp = max(last_stamp + ?, excluded.last_stamp) '
+      'RETURNING last_stamp',
+      variables: [Variable.withInt(now + count - 1), Variable.withInt(count)],
+    );
+    final last = row.single.read<int>('last_stamp');
+    return [
+      for (var i = count - 1; i >= 0; i--)
+        DateTime.fromMicrosecondsSinceEpoch(last - i, isUtc: true),
+    ];
+  }
+
+  Future<void> _createStoreClock() async {
+    await customStatement(
+      'CREATE TABLE IF NOT EXISTS store_clock '
+      '(id INTEGER PRIMARY KEY CHECK (id = 0), '
+      'last_stamp INTEGER NOT NULL)',
+    );
+    // last_updated is in milliseconds; the clock in microseconds.
+    await customStatement(
+      'INSERT OR IGNORE INTO store_clock (id, last_stamp) SELECT 0, '
+      'max(coalesce((SELECT max(last_updated) FROM resources), 0), '
+      'coalesce((SELECT max(last_updated) FROM resources_history), 0)) '
+      '* 1000',
+    );
+  }
+
   @override
   int get schemaVersion => 15;
 
