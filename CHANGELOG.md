@@ -1,5 +1,18 @@
 # fhir_db
 
+## [0.15.5]
+
+- **A fetched resource saved with `preserveMeta` no longer sets this
+  store's clock.** The clock started from the latest stored time on its
+  first use, and a preserved save did not use it, so a fresh store whose
+  first write was a copy carrying a peer's future time started its own
+  clock there. Measured 2026-11-20: a preserved row dated 2099, then a
+  local save, stamped the local save 2099-01-01 00:00:00.000001Z, and
+  every save after it. A preserved save now starts the clock first
+  (`FhirDb.startStoreClock`). Still open: a store written by 0.15.2 or
+  earlier that already holds such a copy starts its clock at that copy's
+  time, because the stored rows do not say which were copies.
+
 ## [0.15.4]
 
 - **`_since` on a resource's history keeps a version saved at the instant

@@ -243,6 +243,9 @@ class FhirDao<R extends FhirNode, T extends Object>
     if (!asServer) _validateIfSearchParameter(withId);
 
     final newResource = await transaction(() async {
+      if (_keepsMeta(withId, preserveMeta)) {
+        await attachedDatabase.startStoreClock();
+      }
       final existingRow =
           await _currentRow(model.typeFromName(withId.fhirType)!, id);
       final currentVersion = existingRow?.versionId;
