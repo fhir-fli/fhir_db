@@ -1,5 +1,18 @@
 # fhir_db
 
+## [0.15.3]
+
+- **Version stamps only go forward.** `meta.lastUpdated` on a save, a
+  batch save and a delete's tombstone is this machine's clock, or one
+  microsecond after the last stamp the store gave when the clock reads
+  earlier (`FhirDb.versionStamp`, `versionStamps`). A clock set back used
+  to stamp new versions before ones a `_since` reader had already passed,
+  and they were never returned to it (R4B http.html §3.1.0.12). The last
+  stamp is kept in `store_clock`, created on first use and started at the
+  latest stored `last_updated`, so a subclass with its own migration needs
+  no step. A batch takes its stamps in one statement. A preserved meta
+  (`preserveMeta`) keeps its own time.
+
 ## [0.15.2]
 
 - **`FhirDao.saveResourceList`** saves many resources in one transaction

@@ -262,6 +262,7 @@ class FhirDao<R extends FhirNode, T extends Object>
                 _metaJsonOf(withId),
                 existingMeta,
                 mergeTags: mergeTags,
+                now: await attachedDatabase.versionStamp(),
                 asServer: asServer,
               ),
             );
@@ -338,7 +339,10 @@ class FhirDao<R extends FhirNode, T extends Object>
       };
       final currentRows = <ResourcesCompanion>[];
       final historyRows = <ResourcesHistoryCompanion>[];
+      final stamps =
+          (await attachedDatabase.versionStamps(withIds.length)).iterator;
       for (final resource in withIds) {
+        stamps.moveNext();
         final key = '${resource.fhirType}/${resource.resourceId!}';
         final updated = _keepsMeta(resource, preserveMeta)
             ? resource
@@ -348,6 +352,7 @@ class FhirDao<R extends FhirNode, T extends Object>
                   _metaJsonOf(resource),
                   metas[key],
                   mergeTags: true,
+                  now: stamps.current,
                   asServer: asServer,
                 ),
               );
@@ -466,9 +471,9 @@ class FhirDao<R extends FhirNode, T extends Object>
     Map<String, dynamic>? submitted,
     Map<String, dynamic>? stored, {
     required bool mergeTags,
+    required DateTime now,
     bool asServer = false,
   }) {
-    final now = DateTime.now().toUtc();
     final storedVersion = stored?['versionId'] as String?;
     final String versionId;
     if (versionIdAsTime) {
@@ -687,7 +692,7 @@ class FhirDao<R extends FhirNode, T extends Object>
           currentVersion != null && int.tryParse(currentVersion) != null
               ? (int.parse(currentVersion) + 1).toString()
               : DateTime.now().toUtc().millisecondsSinceEpoch.toString();
-      final now = DateTime.now().toUtc();
+      final now = await attachedDatabase.versionStamp();
 
       await into(resourcesHistory).insertOnConflictUpdate(
         ResourcesHistoryCompanion(
