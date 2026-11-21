@@ -33,7 +33,6 @@ environment:
 # the generated per-version data (search parameter definitions, the index
 # extractor, the compartment definitions).
 dependencies:
-  collection: ^1.19.1
   crypto: ^3.0.7
   drift: ^2.33.0
   fhir_node: ^0.6.1
