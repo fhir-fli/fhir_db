@@ -642,7 +642,18 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
     // schema-13 upgrade test, 2026-09-14). Their rows return on the next
     // rebuild, which is what `\$reindex` runs.
     final custom = includeUploaded ? await customSearchParameters : null;
-    final started = DateTime.now().millisecondsSinceEpoch;
+    // Every resource written while the rebuild runs, by any connection:
+    // its rows went to the tables about to be dropped, or its page was read
+    // before the write. Kept by triggers rather than read off
+    // `last_updated`, which a save with `preserveMeta` sets to another
+    // server's time: such a save made while the rebuild ran had no rows
+    // afterwards (measured 2026-11-22, a Patient copied in as male during
+    // a rebuild of 6,000 was not found by `gender=male`; saved without
+    // `preserveMeta` it was). Deletions need no record: `resources` no
+    // longer holds them, and the sweep below drops their rows.
+    for (final statement in _rebuildChangedSetup) {
+      await customStatement(statement);
+    }
     const suffix = '_rebuild';
     final m = createMigrator();
     for (final table in _searchTables) {
@@ -697,14 +708,14 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
         );
       }
       await createValueIndexes();
-      // Saved since the rebuild began: their rows went to the tables just
-      // dropped, or the page that held them was read before the save.
-      // Deleted since: their rows may be in the new tables. `resources`
-      // holds the current version of every resource, so it decides both.
+      // Written since the rebuild began: their rows went to the tables
+      // just dropped, or the page that held them was read before the
+      // write. Deleted since: their rows may be in the new tables, and the
+      // sweep after this removes them.
       final changed = await customSelect(
         'SELECT resource_type, id, resource FROM resources '
-        'WHERE last_updated >= ?',
-        variables: [Variable.withInt(started)],
+        'WHERE (resource_type, id) IN '
+        '(SELECT resource_type, id FROM $_rebuildChanged)',
         readsFrom: {resources},
       ).get();
       if (changed.isNotEmpty) {
@@ -745,8 +756,230 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
           "substr($table.id, 1, instr($table.id, '#') - 1))",
         );
       }
+      for (final statement in _rebuildChangedTeardown) {
+        await customStatement(statement);
+      }
     });
     await analyzeFully();
+  }
+
+  /// The table [rebuildSearchIndex] lists the resources written while it
+  /// runs in. A rebuild that died leaves it and its triggers; the next one
+  /// starts them again empty.
+  static const _rebuildChanged = 'search_rebuild_changed';
+
+  static const List<String> _rebuildChangedTeardown = [
+    'DROP TRIGGER IF EXISTS ${_rebuildChanged}_insert',
+    'DROP TRIGGER IF EXISTS ${_rebuildChanged}_update',
+    'DROP TABLE IF EXISTS $_rebuildChanged',
+  ];
+
+  static const _rebuildChangedTable = 'CREATE TABLE $_rebuildChanged '
+      '(resource_type TEXT NOT NULL, id TEXT NOT NULL)';
+
+  static const _rebuildChangedOnInsert =
+      'CREATE TRIGGER ${_rebuildChanged}_insert AFTER INSERT ON resources '
+      'BEGIN INSERT INTO $_rebuildChanged VALUES '
+      '(new.resource_type, new.id); END';
+
+  static const _rebuildChangedOnUpdate =
+      'CREATE TRIGGER ${_rebuildChanged}_update AFTER UPDATE ON resources '
+      'BEGIN INSERT INTO $_rebuildChanged VALUES '
+      '(new.resource_type, new.id); END';
+
+  static const List<String> _rebuildChangedSetup = [
+    ..._rebuildChangedTeardown,
+    _rebuildChangedTable,
+    _rebuildChangedOnInsert,
+    _rebuildChangedOnUpdate,
+  ];
+
+  /// The first word of the names [reindexSearchParameter] writes rows
+  /// under while it builds. No search names one: a FHIR code is "A string
+  /// which has at least one character and no leading or trailing
+  /// whitespace" (R4B `StructureDefinition-code.json`, description,
+  /// hl7.fhir.r4b.core#4.3.0, read 2026-11-22).
+  static const _pending = ' pending ';
+
+  /// The name of the one row [reindexSearchParameter] writes per resource
+  /// it has read, in the uri table. A save or delete of that resource
+  /// removes every row the resource has (`FhirDao` deletes by type and
+  /// id), this one with them, so a resource without it at the end was
+  /// saved, created or deleted while the build ran. That decides what to
+  /// read again, rather than `last_updated`, which a save with
+  /// `preserveMeta` sets to another server's time.
+  static const _readMark = ' read ';
+
+  /// Indexes the uploaded search parameter [code] alone: the search rows
+  /// of that code are made again from the stored resources of the types
+  /// it applies to, and nothing else in the index is touched. Returns the
+  /// number of resources read.
+  ///
+  /// For a `SearchParameter` saved, changed or deleted after resources of
+  /// its base types were stored: a save indexes by the parameters
+  /// registered when it ran, so what was stored before has none of the new
+  /// parameter's rows, or the old definition's. A full
+  /// [rebuildSearchIndex] does the same by re-reading every resource for
+  /// every parameter. Each code is its own job: a definition whose code
+  /// changed from `a` to `b` needs `a` (to remove its rows) and `b`.
+  /// When no active uploaded definition has [code] any more, its rows are
+  /// removed and nothing is read. A code the specification defines on a
+  /// type is never touched on that type: an upload cannot redefine it
+  /// (`CustomSearchParameters.parse`).
+  ///
+  /// The rows are built beside the live ones under a name no search uses;
+  /// then one transaction removes the old rows, renames the new ones in,
+  /// and reads again every resource saved, created or deleted meanwhile.
+  /// A search by [code] meanwhile answers from the old rows; it never
+  /// reads a part-built set. Paged, with a turn of the event loop between
+  /// pages, as [rebuildSearchIndex] is. If the definitions change while
+  /// the build runs, it starts again on the new ones.
+  ///
+  /// Rows left under the building names by a process that died are
+  /// removed when [code] is next re-indexed, and by any full rebuild; no
+  /// search reads them.
+  Future<int> reindexSearchParameter(String code) async {
+    while (true) {
+      final read = await _reindexOne(code);
+      if (read != null) return read;
+    }
+  }
+
+  /// One attempt; null when the definitions changed before the swap.
+  Future<int?> _reindexOne(String code) async {
+    final custom = await customSearchParameters;
+    final names = [code, '$code:of-type'];
+    final pendingNames = [for (final n in names) '$_pending$n'];
+    // The types whose rows under [code] can only be an upload's.
+    final uploadTypes = [
+      for (final t in model.resourceTypeNames)
+        if (model.searchParameters.lookup(t, code) == null) t,
+    ]..sort();
+    final parameters = [
+      for (final p in custom?.all ?? const <CustomSearchParameter>[])
+        if (p.code == code) p,
+    ];
+    final readTypes = [
+      for (final t in uploadTypes)
+        if (parameters.any((p) => p.appliesTo(t))) t,
+    ];
+
+    String inList(List<String> values) =>
+        '(${List.filled(values.length, '?').join(', ')})';
+    List<Variable<Object>> vars(List<String> values) =>
+        [for (final v in values) Variable<Object>(v)];
+
+    Future<void> deleteRows(List<String> types, List<String> rowNames) async {
+      if (types.isEmpty) return;
+      for (final table in searchTableNames) {
+        await customStatement(
+          'DELETE FROM $table WHERE resource_type IN ${inList(types)} '
+          'AND search_name IN ${inList(rowNames)}',
+          [...types, ...rowNames],
+        );
+      }
+    }
+
+    Future<void> appendFor(
+      String json,
+      SearchParameterLists lists,
+      String prefix,
+    ) async {
+      final R resource;
+      try {
+        resource = model.fromJsonText(json);
+      } on Object catch (_) {
+        // As the rebuild: a row the model cannot read adds nothing.
+        return;
+      }
+      await custom!.appendRows(
+        resource,
+        lists,
+        onlyCode: code,
+        namePrefix: prefix,
+      );
+    }
+
+    // Whatever an earlier build of this code left behind.
+    await deleteRows(readTypes, [...pendingNames, _readMark]);
+
+    var count = 0;
+    if (readTypes.isNotEmpty) {
+      const page = 500;
+      var lastType = '';
+      var lastId = '';
+      while (true) {
+        final stored = await customSelect(
+          'SELECT resource_type, id, resource FROM resources '
+          'WHERE resource_type IN ${inList(readTypes)} '
+          'AND (resource_type, id) > (?, ?) '
+          'ORDER BY resource_type, id LIMIT $page',
+          variables: [
+            ...vars(readTypes),
+            ...vars([lastType, lastId]),
+          ],
+          readsFrom: {resources},
+        ).get();
+        if (stored.isEmpty) break;
+        lastType = stored.last.read<String>('resource_type');
+        lastId = stored.last.read<String>('id');
+        final lists = SearchParameterLists();
+        for (final row in stored) {
+          await appendFor(row.read<String>('resource'), lists, _pending);
+          lists.uriParams.add(
+            UriSearchParametersCompanion.insert(
+              resourceType: row.read<String>('resource_type'),
+              id: row.read<String>('id'),
+              lastUpdated: 0,
+              searchName: const Value(_readMark),
+              paramIndex: 0,
+              uriValue: '',
+            ),
+          );
+        }
+        count += stored.length;
+        await _insertLists(lists);
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+
+    return transaction(() async {
+      if (!identical(_customLoaded, custom)) {
+        // A definition was saved or deleted while this built: build again
+        // on what is registered now.
+        await deleteRows(readTypes, [...pendingNames, _readMark]);
+        return null;
+      }
+      await deleteRows(uploadTypes, names);
+      if (readTypes.isEmpty) return count;
+      for (final table in searchTableNames) {
+        await customStatement(
+          'UPDATE $table SET search_name = '
+          'substr(search_name, ${_pending.length + 1}) '
+          'WHERE resource_type IN ${inList(readTypes)} '
+          'AND search_name IN ${inList(pendingNames)}',
+          [...readTypes, ...pendingNames],
+        );
+      }
+      // Saved or created while this built: no mark. Deleted meanwhile:
+      // the delete took the resource's rows, its mark among them.
+      final changed = await customSelect(
+        'SELECT r.resource FROM resources r '
+        'WHERE r.resource_type IN ${inList(readTypes)} '
+        'AND NOT EXISTS (SELECT 1 FROM uri_search_parameters u '
+        'WHERE u.resource_type = r.resource_type AND u.id = r.id '
+        'AND u.search_name = ?)',
+        variables: [...vars(readTypes), const Variable<Object>(_readMark)],
+        readsFrom: {resources, uriSearchParameters},
+      ).get();
+      final lists = SearchParameterLists();
+      for (final row in changed) {
+        await appendFor(row.read<String>('resource'), lists, '');
+      }
+      await _insertLists(lists);
+      await deleteRows(readTypes, [_readMark]);
+      return count;
+    });
   }
 
   /// Parses [json] and appends the rows the index holds for it, with those

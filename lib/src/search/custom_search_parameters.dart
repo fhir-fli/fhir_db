@@ -256,8 +256,21 @@ class CustomSearchParameters {
   /// type, the same builders the generated extractor uses. An evaluation
   /// error propagates: the save fails rather than storing a resource the
   /// parameter cannot find, as every other indexing failure does here.
-  Future<void> appendRows(FhirNode resource, SearchParameterLists into) async {
-    final parameters = forType(resource.fhirType);
+  ///
+  /// With [onlyCode], only the parameters of that code are evaluated, and
+  /// each row's name is [namePrefix] before the code: how
+  /// `FhirDb.reindexSearchParameter` builds one parameter's rows beside
+  /// the live ones.
+  Future<void> appendRows(
+    FhirNode resource,
+    SearchParameterLists into, {
+    String? onlyCode,
+    String namePrefix = '',
+  }) async {
+    final parameters = [
+      for (final p in forType(resource.fhirType))
+        if (onlyCode == null || p.code == onlyCode) p,
+    ];
     if (parameters.isEmpty) return;
     final resourceType = resource.fhirType;
     final id = resource.resourceId;
@@ -277,7 +290,7 @@ class CustomSearchParameters {
                 lastUpdated,
                 p.expression,
                 i,
-                searchName: p.code,
+                searchName: '$namePrefix${p.code}',
               ),
             );
           case 'token':
@@ -289,7 +302,7 @@ class CustomSearchParameters {
                 lastUpdated,
                 p.expression,
                 i,
-                searchName: p.code,
+                searchName: '$namePrefix${p.code}',
               ),
             );
           case 'reference':
@@ -301,7 +314,7 @@ class CustomSearchParameters {
                 lastUpdated,
                 p.expression,
                 i,
-                searchName: p.code,
+                searchName: '$namePrefix${p.code}',
               ),
             );
           case 'date':
@@ -313,7 +326,7 @@ class CustomSearchParameters {
                 lastUpdated,
                 p.expression,
                 i,
-                searchName: p.code,
+                searchName: '$namePrefix${p.code}',
               ),
             );
           case 'quantity':
@@ -325,7 +338,7 @@ class CustomSearchParameters {
                 lastUpdated,
                 p.expression,
                 i,
-                searchName: p.code,
+                searchName: '$namePrefix${p.code}',
               ),
             );
           case 'number':
@@ -337,7 +350,7 @@ class CustomSearchParameters {
                 lastUpdated,
                 p.expression,
                 i,
-                searchName: p.code,
+                searchName: '$namePrefix${p.code}',
               ),
             );
           case 'uri':
@@ -349,7 +362,7 @@ class CustomSearchParameters {
                 lastUpdated,
                 p.expression,
                 i,
-                searchName: p.code,
+                searchName: '$namePrefix${p.code}',
               ),
             );
           case 'special':
@@ -361,7 +374,7 @@ class CustomSearchParameters {
                 lastUpdated,
                 p.expression,
                 i,
-                searchName: p.code,
+                searchName: '$namePrefix${p.code}',
               ),
             );
         }
