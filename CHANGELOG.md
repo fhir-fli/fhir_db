@@ -1,5 +1,23 @@
 # fhir_db
 
+## [0.15.7]
+
+- **A change to the uploaded search parameters re-indexes what it changed,
+  by itself.** After a `SearchParameter` is saved, deleted or purged, the
+  codes whose definitions differ (added, removed, or changed in type,
+  base, target or expression) are each queued for
+  `reindexSearchParameter` in the background, one at a time.
+  `FhirDb.searchParameterIndexing` says which code is running or waiting
+  and how each one's last re-index ended (when, resources read, or the
+  error). On by default, as HAPI FHIR's `JpaStorageSettings` is ("This
+  should generally be true (which is the default)");
+  `reindexOnSearchParameterChange = false` turns it off. Until a code's
+  re-index ends, a search by it answers from the rows it had. A
+  definition saved inside a transaction is indexed after the commit.
+- **Purging `SearchParameter` resources stops their indexing**, as a
+  delete does: `purgeResourcesLastUpdatedBefore` did not reload the
+  registry.
+
 ## [0.15.6]
 
 - **`FhirDb.reindexSearchParameter(code)` indexes one uploaded search

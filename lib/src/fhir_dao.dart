@@ -3514,6 +3514,8 @@ class FhirDao<R extends FhirNode, T extends Object>
         });
       }
     });
+    // A purged definition stops indexing, as a deleted one does.
+    await _reloadIfSearchParameter(resourceTypeString);
     return ids.length;
   }
 

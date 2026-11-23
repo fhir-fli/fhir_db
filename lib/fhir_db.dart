@@ -19,6 +19,7 @@ export 'src/search/normalize.dart';
 export 'src/search/search_date_range.dart';
 export 'src/search/search_escaping.dart';
 export 'src/search/search_indexer.dart';
+export 'src/search/search_parameter_indexing.dart';
 export 'src/search/search_parameter_types.dart';
 export 'src/search/search_query_key.dart';
 export 'src/tables/tables.dart';
