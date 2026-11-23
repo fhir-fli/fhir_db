@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:drift/drift.dart';
 import 'package:fhir_db/src/cipher_from_key.dart';
 import 'package:fhir_db/src/fhir_dao.dart';
@@ -5,6 +7,7 @@ import 'package:fhir_db/src/fhir_model.dart';
 import 'package:fhir_db/src/search/contained_index.dart';
 import 'package:fhir_db/src/search/custom_search_parameters.dart';
 import 'package:fhir_db/src/search/search_indexer.dart';
+import 'package:fhir_db/src/search/search_parameter_indexing.dart';
 import 'package:fhir_db/src/search/search_parameter_types.dart';
 import 'package:fhir_db/src/tables/tables.dart';
 import 'package:fhir_node/fhir_node.dart';
@@ -108,11 +111,68 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
   CustomSearchParameters? get customSearchParametersIfLoaded => _customLoaded;
 
   /// Reads the registry again: after a `SearchParameter` is saved or
-  /// deleted.
-  Future<CustomSearchParameters?> reloadCustomSearchParameters() {
+  /// deleted. With [reindexOnSearchParameterChange], each code whose
+  /// definitions differ from the registry before is queued for
+  /// [reindexSearchParameter] in the background ([searchParameterIndexing]).
+  Future<CustomSearchParameters?> reloadCustomSearchParameters() async {
+    final before = _customLoaded;
     _customSearchParameters = null;
-    return customSearchParameters;
+    final after = await customSearchParameters;
+    if (reindexOnSearchParameterChange && before != null && after != null) {
+      for (final code in changedSearchParameterCodes(before, after)) {
+        searchParameterIndexing.schedule(
+          code,
+          (code) => _outsideCallerZone(() => reindexSearchParameter(code)),
+        );
+      }
+    }
+    return after;
   }
+
+  /// Runs [job] in a zone of its own under the root zone, and answers its
+  /// result or its first error. Not in the caller's zone: a save inside a
+  /// transaction would hand the job that transaction, closed by the time
+  /// the job runs; under the root zone it waits for the commit. Guarded:
+  /// an error the job raised and nothing awaited would otherwise reach the
+  /// root zone and end the process. Measured 2026-11-23: run under the
+  /// root zone unguarded, a re-index whose expression failed (`single()`
+  /// over two names) ended the test process with "Unhandled exception".
+  static Future<int> _outsideCallerZone(Future<int> Function() job) {
+    final result = Completer<int>();
+    Zone.root.run(() {
+      // The guarded zone's own future is null here; the result is read
+      // from [result].
+      unawaited(
+        runZonedGuarded(
+          () async {
+            final read = await job();
+            if (!result.isCompleted) result.complete(read);
+          },
+          (error, stack) {
+            if (!result.isCompleted) result.completeError(error, stack);
+          },
+        ),
+      );
+    });
+    return result.future;
+  }
+
+  /// Whether a change to the uploaded search parameters re-indexes the
+  /// codes it changed by itself, in the background, as
+  /// [reloadCustomSearchParameters] says. On by default, as HAPI FHIR's
+  /// `JpaStorageSettings` is ("Should resources be marked as needing
+  /// reindexing when a SearchParameter resource is added or changed. This
+  /// should generally be true (which is the default)", hapi-fhir master,
+  /// read 2026-11-23); off, the owner calls [reindexSearchParameter] or
+  /// [rebuildSearchIndex] itself. Until a code's re-index ends, a search
+  /// by it answers from the rows it had: none for resources stored before
+  /// the definition, the old definition's for a changed one.
+  bool reindexOnSearchParameterChange = true;
+
+  /// The background re-indexing [reindexOnSearchParameterChange] starts:
+  /// what is waiting or running, and how each code's last run ended.
+  final SearchParameterIndexing searchParameterIndexing =
+      SearchParameterIndexing();
 
   Future<CustomSearchParameters?> _loadCustomSearchParameters() async {
     final engine = model.createFhirPathEngine(
