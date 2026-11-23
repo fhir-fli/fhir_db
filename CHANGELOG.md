@@ -1,5 +1,26 @@
 # fhir_db
 
+## [0.15.6]
+
+- **`FhirDb.reindexSearchParameter(code)` indexes one uploaded search
+  parameter alone.** A save indexes by the parameters registered when it
+  ran, so resources stored before a `SearchParameter` was saved, changed
+  or deleted had none of its rows, or the old definition's, until a full
+  `rebuildSearchIndex` re-read every resource for every parameter. This
+  removes that code's rows and makes them again from the resources of the
+  types it applies to, touching no other row. The new rows are built
+  under a name no search uses and swapped in by one transaction, so a
+  search meanwhile answers from the old rows; a resource written or
+  deleted meanwhile is read again at the swap. A code the specification
+  defines on a type keeps that type's rows.
+- **A full rebuild keeps a copy saved with `preserveMeta` while it ran.**
+  The rebuild found what was saved meanwhile by `last_updated` at or after
+  its start, and a copy that keeps another server's time is dated before
+  it, so it was left with no search rows. Measured 2026-11-22: a Patient
+  copied in as male during a rebuild of 6,000 was not found by
+  `gender=male`; saved without `preserveMeta` it was. Writes during the
+  rebuild are now listed by triggers on `resources`.
+
 ## [0.15.5]
 
 - **A fetched resource saved with `preserveMeta` no longer sets this
