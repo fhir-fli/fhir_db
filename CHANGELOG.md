@@ -1,5 +1,27 @@
 # fhir_db
 
+## [0.15.8]
+
+- **A `SearchParameter` saved through one connection to a store file is
+  known to every other.** Each `FhirDb` read the uploaded search
+  parameters once and kept them, so a second connection to the same file
+  (an app's background service and its screens, two processes) searched
+  by a code the first had uploaded as if the code were absent, and its
+  own saves wrote no rows under it, until it was reopened (measured with
+  two connections, 2026-11-24). Triggers on `resources` now count every
+  insert, update or delete of a `SearchParameter` row in
+  `search_parameter_generation`, created on first use like `store_clock`;
+  each save or search reads the count (`searchParameterGeneration`,
+  25 µs measured on a file store) and reads the definitions again when it
+  moved. Only the connection that made the change re-indexes. A
+  definition saved in a transaction that rolled back is dropped from the
+  registry the same way.
+- **A store whose first save was in a transaction that rolled back can
+  save again.** `store_clock` is created on first use; created inside that
+  transaction it was rolled back with it, and every later save on the
+  connection failed with "no such table: store_clock" (since 0.15.3). A
+  use that finds the table gone now creates it again.
+
 ## [0.15.7]
 
 - **A change to the uploaded search parameters re-indexes what it changed,
