@@ -103,8 +103,24 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
   /// when the model has no FHIRPath engine ([FhirModel.createFhirPathEngine]).
   /// The DAO awaits this at every entry that saves, deletes or searches, so
   /// the synchronous lookups inside a search read a loaded registry.
-  Future<CustomSearchParameters?> get customSearchParameters =>
-      _customSearchParameters ??= _loadCustomSearchParameters();
+  ///
+  /// Read again whenever the store's [searchParameterGeneration] has moved
+  /// since the last read: another connection to the same file (another
+  /// isolate or process) saved, changed or deleted a `SearchParameter`.
+  /// Measured 2026-11-24 with two connections to one file, before this
+  /// check: the second searched by a code the first had uploaded as if the
+  /// code were absent (every patient, not the female one), and its own
+  /// saves wrote no rows under the code, until it was reopened.
+  Future<CustomSearchParameters?> get customSearchParameters async {
+    final generation = await searchParameterGeneration();
+    final loaded = _customSearchParameters;
+    if (loaded != null && generation == _loadedGeneration) return loaded;
+    _loadedGeneration = generation;
+    return _customSearchParameters = _loadCustomSearchParameters();
+  }
+
+  /// The [searchParameterGeneration] the registry was read at.
+  int? _loadedGeneration;
 
   /// The registry once loaded, for the synchronous lookups; null before the
   /// first [customSearchParameters] completes or when there is no engine.
@@ -114,10 +130,15 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
   /// deleted. With [reindexOnSearchParameterChange], each code whose
   /// definitions differ from the registry before is queued for
   /// [reindexSearchParameter] in the background ([searchParameterIndexing]).
+  ///
+  /// Only the connection that made the change schedules: another one that
+  /// finds the change through [searchParameterGeneration] reads the
+  /// registry again and leaves the indexing to it.
   Future<CustomSearchParameters?> reloadCustomSearchParameters() async {
     final before = _customLoaded;
-    _customSearchParameters = null;
-    final after = await customSearchParameters;
+    _loadedGeneration = await searchParameterGeneration();
+    final after =
+        await (_customSearchParameters = _loadCustomSearchParameters());
     if (reindexOnSearchParameterChange && before != null && after != null) {
       for (final code in changedSearchParameterCodes(before, after)) {
         searchParameterIndexing.schedule(
@@ -214,10 +235,48 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
     return _customLoaded = registry;
   }
 
+  /// A count the store keeps of changes to its stored `SearchParameter`
+  /// resources: triggers on `resources` add one for every row of that type
+  /// inserted, updated or deleted, by any connection to the file, so each
+  /// connection can tell its registry is out of date
+  /// ([customSearchParameters]). The table and its triggers are created on
+  /// first use, as `store_clock` is ([startStoreClock]), so a subclass with
+  /// its own [migration] needs no step for them.
+  Future<int> searchParameterGeneration() => _generation.use(() async {
+        final row = await customSelect(
+          'SELECT n FROM $_generationTable WHERE id = 0',
+        ).getSingle();
+        return row.read<int>('n');
+      });
+
+  late final _generation = _CreatedOnFirstUse(_createGeneration);
+
+  static const _generationTable = 'search_parameter_generation';
+
+  Future<void> _createGeneration() async {
+    await customStatement(
+      'CREATE TABLE IF NOT EXISTS $_generationTable '
+      '(id INTEGER PRIMARY KEY CHECK (id = 0), n INTEGER NOT NULL)',
+    );
+    await customStatement(
+      'INSERT OR IGNORE INTO $_generationTable (id, n) VALUES (0, 0)',
+    );
+    for (final (event, row) in [
+      ('INSERT', 'new'),
+      ('UPDATE', 'new'),
+      ('DELETE', 'old'),
+    ]) {
+      await customStatement(
+        'CREATE TRIGGER IF NOT EXISTS ${_generationTable}_'
+        '${event.toLowerCase()} AFTER $event ON resources '
+        "WHEN $row.resource_type = 'SearchParameter' "
+        'BEGIN UPDATE $_generationTable SET n = n + 1 WHERE id = 0; END',
+      );
+    }
+  }
+
   /// The data-access object over this database.
   late final FhirDao<R, T> fhirDao = FhirDao<R, T>(this);
-
-  Future<void>? _storeClockReady;
 
   /// The time to stamp on a version this store saves, as `meta.lastUpdated`:
   /// this machine's clock, or, when that reads no later than the last stamp
@@ -247,16 +306,20 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
   /// the clock, 68 with a statement per resource).
   Future<List<DateTime>> versionStamps(int count) async {
     if (count < 1) return const [];
-    await startStoreClock();
-    final now = DateTime.now().toUtc().microsecondsSinceEpoch;
-    final row = await customWriteReturning(
-      'INSERT INTO store_clock (id, last_stamp) VALUES (0, ?) '
-      'ON CONFLICT (id) DO UPDATE SET '
-      'last_stamp = max(last_stamp + ?, excluded.last_stamp) '
-      'RETURNING last_stamp',
-      variables: [Variable.withInt(now + count - 1), Variable.withInt(count)],
-    );
-    final last = row.single.read<int>('last_stamp');
+    final last = await _storeClock.use(() async {
+      final now = DateTime.now().toUtc().microsecondsSinceEpoch;
+      final row = await customWriteReturning(
+        'INSERT INTO store_clock (id, last_stamp) VALUES (0, ?) '
+        'ON CONFLICT (id) DO UPDATE SET '
+        'last_stamp = max(last_stamp + ?, excluded.last_stamp) '
+        'RETURNING last_stamp',
+        variables: [
+          Variable.withInt(now + count - 1),
+          Variable.withInt(count),
+        ],
+      );
+      return row.single.read<int>('last_stamp');
+    });
     return [
       for (var i = count - 1; i >= 0; i--)
         DateTime.fromMicrosecondsSinceEpoch(last - i, isUtc: true),
@@ -268,7 +331,9 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
   /// writing, so the clock starts from what this store stamped, not from a
   /// peer's time: a preserved 2099 row as a fresh store's first write made
   /// every later local save 2099 (measured 2026-11-20).
-  Future<void> startStoreClock() => _storeClockReady ??= _createStoreClock();
+  Future<void> startStoreClock() => _storeClock.use(() async {});
+
+  late final _storeClock = _CreatedOnFirstUse(_createStoreClock);
 
   Future<void> _createStoreClock() async {
     await customStatement(
@@ -1345,6 +1410,33 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
       'idx_special_value',
     ]) {
       await customStatement('DROP INDEX IF EXISTS $name');
+    }
+  }
+}
+
+/// A table a store creates the first time it needs it (`store_clock`,
+/// `search_parameter_generation`), so a subclass with its own migration
+/// needs no step for it. Created inside a caller's transaction that then
+/// rolls back, the table is gone though its creation completed: measured
+/// 2026-11-24 (fhir_r4_db `search_parameter_two_connections_test.dart`),
+/// a store whose first save was in a transaction that rolled back failed
+/// every later save on that connection with "no such table: store_clock".
+/// So a use that finds no table creates it again, once.
+class _CreatedOnFirstUse {
+  _CreatedOnFirstUse(this._create);
+
+  final Future<void> Function() _create;
+  Future<void>? _ready;
+
+  Future<T> use<T>(Future<T> Function() body) async {
+    await (_ready ??= _create());
+    try {
+      return await body();
+    } on Object catch (e) {
+      if (!'$e'.contains('no such table')) rethrow;
+      _ready = null;
+      await (_ready ??= _create());
+      return body();
     }
   }
 }
