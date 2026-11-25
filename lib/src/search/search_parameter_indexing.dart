@@ -209,14 +209,20 @@ class SearchParameterIndexing {
         _again = false;
         if (await _nextPending() == null) return;
         final holder = _newHolder();
-        if (!await _claim(holder)) {
+        final claimed = await _claim(holder);
+        if (claimed != true) {
           // Another connection runs the queue, or held it and has not been
-          // heard from within [staleAfter]: look again then.
+          // heard from within [staleAfter]: look again then. Or another
+          // connection was writing (null): look again shortly.
           _retry?.cancel();
-          _retry = Timer(staleAfter, resume);
+          _retry = Timer(claimed == null ? busyRetry : staleAfter, resume);
           return;
         }
-        await _drain(holder);
+        if (!await _drain(holder)) {
+          _retry?.cancel();
+          _retry = Timer(busyRetry, resume);
+          return;
+        }
         if (_closed) return;
         // A connection that queued while this one held the lease found it
         // held, and left its code to this run.
@@ -227,12 +233,15 @@ class SearchParameterIndexing {
     }
   }
 
-  Future<void> _drain(String holder) async {
+  /// Runs the queue while [holder] holds the lease. False when a write
+  /// found the store locked by another connection: the code under way
+  /// stays queued, and the caller looks again after [busyRetry].
+  Future<bool> _drain(String holder) async {
     final renew = _renewEvery(holder);
     try {
       while (!_closed) {
         final code = await _nextPending();
-        if (code == null) return;
+        if (code == null) return true;
         final took = await _db.customUpdate(
           'UPDATE $queueTable SET holder = ?, running_since = ?, '
           'run_wanted = wanted WHERE code = ? AND EXISTS '
@@ -245,7 +254,7 @@ class SearchParameterIndexing {
           ],
           updateKind: UpdateKind.update,
         );
-        if (took == 0) return;
+        if (took == 0) return true;
         final started = _now();
         int? read;
         String? error;
@@ -253,9 +262,13 @@ class SearchParameterIndexing {
           read = await _reindex(code, () => _stillHeld(holder));
         } on SearchParameterIndexingStopped {
           // Left as it stands: queued, and taken up by the next run.
-          return;
+          return true;
         } on Object catch (e) {
-          if (_closed) return;
+          if (_closed) return true;
+          // Another connection held the store's write lock past this
+          // connection's busy timeout (or it has none): not this code's
+          // failure. It stays queued and runs again.
+          if (isBusy(e)) return false;
           error = '$e';
         }
         await _db.customUpdate(
@@ -276,6 +289,10 @@ class SearchParameterIndexing {
           updateKind: UpdateKind.update,
         );
       }
+      return true;
+    } on Object catch (e) {
+      if (isBusy(e)) return false;
+      rethrow;
     } finally {
       renew.cancel();
       await _release(holder);
@@ -296,7 +313,7 @@ class SearchParameterIndexing {
     Future<T> Function(Future<void> Function() stillHeld) body,
   ) async {
     final holder = _newHolder();
-    while (!await _tables.use(() => _claim(holder))) {
+    while (await _tables.use(() => _claim(holder)) != true) {
       if (_closed) {
         throw const SearchParameterIndexingStopped('the store is closing');
       }
@@ -325,16 +342,34 @@ class SearchParameterIndexing {
       });
 
   Future<void> _release(String holder) async {
-    try {
-      await _db.customStatement(
-        'DELETE FROM $leaseTable WHERE id = 0 AND holder = ?',
-        [holder],
-      );
-    } on Object catch (e) {
-      // Left to go stale; the next run takes it over.
-      _workerError = e;
+    for (var attempt = 1;; attempt++) {
+      try {
+        await _db.customStatement(
+          'DELETE FROM $leaseTable WHERE id = 0 AND holder = ?',
+          [holder],
+        );
+        return;
+      } on Object catch (e) {
+        if (isBusy(e) && attempt < 10 && !_closed) {
+          await Future<void>.delayed(Duration(milliseconds: 100 * attempt));
+          continue;
+        }
+        // Left to go stale; the next run takes it over.
+        _workerError = e;
+        return;
+      }
     }
   }
+
+  /// How soon a run that found the store locked by another connection's
+  /// write looks again.
+  Duration busyRetry = const Duration(seconds: 1);
+
+  /// Whether [e] is SQLite's "database is locked" (SQLITE_BUSY): another
+  /// connection held the write lock past this one's busy timeout, or this
+  /// one has none. Read from the message, as the store reads "no such
+  /// table": the executor's exception type is not this package's to name.
+  static bool isBusy(Object e) => '$e'.contains('database is locked');
 
   Future<String?> _nextPending() => _tables.use(() async {
         final row = await _db
@@ -346,20 +381,29 @@ class SearchParameterIndexing {
         return row?.read<String>('code');
       });
 
-  Future<bool> _claim(String holder) async {
+  /// Takes the lease for [holder] if it is free or stale: true taken,
+  /// false held by a live run, null when another connection's write kept
+  /// the store locked ([isBusy]).
+  Future<bool?> _claim(String holder) async {
     final now = _now();
-    final n = await _db.customUpdate(
-      'INSERT INTO $leaseTable (id, holder, heartbeat) VALUES (0, ?, ?) '
-      'ON CONFLICT(id) DO UPDATE SET holder = excluded.holder, '
-      'heartbeat = excluded.heartbeat '
-      'WHERE $leaseTable.heartbeat < ?',
-      variables: [
-        Variable.withString(holder),
-        Variable.withInt(now),
-        Variable.withInt(now - staleAfter.inMilliseconds),
-      ],
-      updateKind: UpdateKind.update,
-    );
+    final int n;
+    try {
+      n = await _db.customUpdate(
+        'INSERT INTO $leaseTable (id, holder, heartbeat) VALUES (0, ?, ?) '
+        'ON CONFLICT(id) DO UPDATE SET holder = excluded.holder, '
+        'heartbeat = excluded.heartbeat '
+        'WHERE $leaseTable.heartbeat < ?',
+        variables: [
+          Variable.withString(holder),
+          Variable.withInt(now),
+          Variable.withInt(now - staleAfter.inMilliseconds),
+        ],
+        updateKind: UpdateKind.update,
+      );
+    } on Object catch (e) {
+      if (isBusy(e)) return null;
+      rethrow;
+    }
     return n > 0;
   }
 
@@ -417,6 +461,8 @@ class SearchParameterIndexing {
       // A run that ended on an error of its own would end the same way
       // again.
       if (!identical(_workerError, before)) return;
+      // Still queued: the store was locked by another connection's write.
+      await Future<void>.delayed(const Duration(milliseconds: 20));
     }
   }
 

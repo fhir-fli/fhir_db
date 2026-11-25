@@ -1,5 +1,24 @@
 # fhir_db
 
+## [0.16.2]
+
+- **A background re-index that finds the store locked by another
+  connection's write stays queued and runs again**, instead of being
+  recorded as failed or left holding the lease. "database is locked"
+  (SQLITE_BUSY) is SQLite's answer when another connection holds the
+  write lock and this one stops waiting: at its busy timeout, or at once
+  with none (fhirant's store sets none). On 0.16.1, a run whose
+  connection had no busy timeout and met another connection's write was
+  still shown running 30 s after the lock cleared, three runs in three;
+  now it finishes. The lease's claim takes the same error as "not now"
+  (`reindexSearchParameter` waits and tries again; a background run
+  looks again after `busyRetry`, 1 s), and its release retries.
+- Seen on CI 2026-11-25 with a 10 s busy timeout set: the claim inside
+  `reindexSearchParameter` failed with "database is locked" within about
+  2 s of its test starting, while another connection's background run
+  was building. Why SQLite stopped waiting before the timeout was not
+  found; the claim now retries either way.
+
 ## [0.16.1]
 
 - **A re-index no longer holds the store's write lock for seconds at the
