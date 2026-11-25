@@ -1072,7 +1072,9 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
               lastUpdated: 0,
               searchName: const Value(_readMark),
               paramIndex: 0,
-              uriValue: '',
+              // The id again, so the check before the swap finds the mark
+              // by a seek on the value index (see there).
+              uriValue: row.read<String>('id'),
             ),
           );
         }
@@ -1114,12 +1116,20 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
       }
       // Saved or created while this built: no mark. Deleted meanwhile:
       // the delete took the resource's rows, its mark among them.
+      // The mark is looked up by type, name and value, the leading columns
+      // of the uri table's value index, so each lookup is one seek. With
+      // only type and name to go on, SQLite chose that index anyway and
+      // read every mark for every resource: 11.1 s for 20,000 patients,
+      // all of it inside this transaction, holding the store's write lock
+      // (measured 2026-11-25, fhir_r4_db
+      // tool/probe_writer_during_reindex.dart; another connection's save
+      // waited out its 10 s busy timeout and failed).
       final changed = await customSelect(
         'SELECT r.resource FROM resources r '
         'WHERE r.resource_type IN ${inList(readTypes)} '
         'AND NOT EXISTS (SELECT 1 FROM uri_search_parameters u '
         'WHERE u.resource_type = r.resource_type AND u.id = r.id '
-        'AND u.search_name = ?)',
+        'AND u.search_name = ? AND u.uri_value = r.id)',
         variables: [...vars(readTypes), const Variable<Object>(_readMark)],
         readsFrom: {resources, uriSearchParameters},
       ).get();

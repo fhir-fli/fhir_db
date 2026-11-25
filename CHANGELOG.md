@@ -1,5 +1,18 @@
 # fhir_db
 
+## [0.16.1]
+
+- **A re-index no longer holds the store's write lock for seconds at the
+  end.** Its last step, one transaction, looks for records saved while it
+  built by the mark it leaves on each record it read. SQLite looked each
+  mark up by type and name only and read every mark for every record:
+  11.1 s of a 12.6 s run at 20,000 patients, during which another
+  connection's save waited out its 10 s busy timeout and failed
+  ("database is locked"; the same on 0.15.8). The mark now carries the
+  record's id as its value and the check seeks by it: the run takes
+  2.3 s and no save fails (slowest 240 ms). Measured with fhir_r4_db
+  `tool/probe_writer_during_reindex.dart`.
+
 ## [0.16.0]
 
 - **Breaking: the background re-index is recorded in the store, not in
