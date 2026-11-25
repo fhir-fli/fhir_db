@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:drift/drift.dart';
 import 'package:fhir_db/src/cipher_from_key.dart';
+import 'package:fhir_db/src/created_on_first_use.dart';
 import 'package:fhir_db/src/fhir_dao.dart';
 import 'package:fhir_db/src/fhir_model.dart';
 import 'package:fhir_db/src/search/contained_index.dart';
@@ -115,6 +116,11 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
     final generation = await searchParameterGeneration();
     final loaded = _customSearchParameters;
     if (loaded != null && generation == _loadedGeneration) return loaded;
+    if (loaded == null) {
+      // At first use, take up a re-index another connection queued and did
+      // not finish: its process ended with it.
+      searchParameterIndexing.resume();
+    }
     _loadedGeneration = generation;
     return _customSearchParameters = _loadCustomSearchParameters();
   }
@@ -131,9 +137,10 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
   /// definitions differ from the registry before is queued for
   /// [reindexSearchParameter] in the background ([searchParameterIndexing]).
   ///
-  /// Only the connection that made the change schedules: another one that
+  /// Only the connection that made the change queues it: another one that
   /// finds the change through [searchParameterGeneration] reads the
-  /// registry again and leaves the indexing to it.
+  /// registry again. Whichever connection holds the store's re-indexing
+  /// lease runs the queue.
   Future<CustomSearchParameters?> reloadCustomSearchParameters() async {
     final before = _customLoaded;
     _loadedGeneration = await searchParameterGeneration();
@@ -141,41 +148,10 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
         await (_customSearchParameters = _loadCustomSearchParameters());
     if (reindexOnSearchParameterChange && before != null && after != null) {
       for (final code in changedSearchParameterCodes(before, after)) {
-        searchParameterIndexing.schedule(
-          code,
-          (code) => _outsideCallerZone(() => reindexSearchParameter(code)),
-        );
+        await searchParameterIndexing.schedule(code);
       }
     }
     return after;
-  }
-
-  /// Runs [job] in a zone of its own under the root zone, and answers its
-  /// result or its first error. Not in the caller's zone: a save inside a
-  /// transaction would hand the job that transaction, closed by the time
-  /// the job runs; under the root zone it waits for the commit. Guarded:
-  /// an error the job raised and nothing awaited would otherwise reach the
-  /// root zone and end the process. Measured 2026-11-23: run under the
-  /// root zone unguarded, a re-index whose expression failed (`single()`
-  /// over two names) ended the test process with "Unhandled exception".
-  static Future<int> _outsideCallerZone(Future<int> Function() job) {
-    final result = Completer<int>();
-    Zone.root.run(() {
-      // The guarded zone's own future is null here; the result is read
-      // from [result].
-      unawaited(
-        runZonedGuarded(
-          () async {
-            final read = await job();
-            if (!result.isCompleted) result.complete(read);
-          },
-          (error, stack) {
-            if (!result.isCompleted) result.completeError(error, stack);
-          },
-        ),
-      );
-    });
-    return result.future;
   }
 
   /// Whether a change to the uploaded search parameters re-indexes the
@@ -185,15 +161,31 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
   /// reindexing when a SearchParameter resource is added or changed. This
   /// should generally be true (which is the default)", hapi-fhir master,
   /// read 2026-11-23); off, the owner calls [reindexSearchParameter] or
-  /// [rebuildSearchIndex] itself. Until a code's re-index ends, a search
-  /// by it answers from the rows it had: none for resources stored before
-  /// the definition, the old definition's for a changed one.
+  /// [rebuildSearchIndex] itself, and this connection neither queues codes
+  /// nor runs the queue. Until a code's re-index ends, a search by it
+  /// answers from the rows it had: none for resources stored before the
+  /// definition, the old definition's for a changed one.
   bool reindexOnSearchParameterChange = true;
 
-  /// The background re-indexing [reindexOnSearchParameterChange] starts:
-  /// what is waiting or running, and how each code's last run ended.
-  final SearchParameterIndexing searchParameterIndexing =
-      SearchParameterIndexing();
+  /// The background re-indexing [reindexOnSearchParameterChange] starts,
+  /// kept in the store so every connection to the file reads the same
+  /// record ([SearchParameterIndexing.status]) and a run cut off with its
+  /// process is taken up again.
+  late final SearchParameterIndexing searchParameterIndexing =
+      SearchParameterIndexing(
+    this,
+    (code, stillHeld) => _reindexSearchParameter(code, stillHeld: stillHeld),
+    () => reindexOnSearchParameterChange,
+  );
+
+  /// Stops this connection's background re-index before its next write and
+  /// gives up its lease, so another connection takes the queue up at once,
+  /// then closes.
+  @override
+  Future<void> close() async {
+    await searchParameterIndexing.stop();
+    await super.close();
+  }
 
   Future<CustomSearchParameters?> _loadCustomSearchParameters() async {
     final engine = model.createFhirPathEngine(
@@ -249,7 +241,7 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
         return row.read<int>('n');
       });
 
-  late final _generation = _CreatedOnFirstUse(_createGeneration);
+  late final _generation = CreatedOnFirstUse(_createGeneration);
 
   static const _generationTable = 'search_parameter_generation';
 
@@ -333,7 +325,7 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
   /// every later local save 2099 (measured 2026-11-20).
   Future<void> startStoreClock() => _storeClock.use(() async {});
 
-  late final _storeClock = _CreatedOnFirstUse(_createStoreClock);
+  late final _storeClock = CreatedOnFirstUse(_createStoreClock);
 
   Future<void> _createStoreClock() async {
     await customStatement(
@@ -963,15 +955,36 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
   /// Rows left under the building names by a process that died are
   /// removed when [code] is next re-indexed, and by any full rebuild; no
   /// search reads them.
-  Future<int> reindexSearchParameter(String code) async {
+  ///
+  /// Holds the store's re-indexing lease while it runs
+  /// ([SearchParameterIndexing.exclusive]): it waits for a background run
+  /// to end, and none starts until it has.
+  Future<int> reindexSearchParameter(String code) =>
+      searchParameterIndexing.exclusive(
+        (stillHeld) => _reindexSearchParameter(code, stillHeld: stillHeld),
+      );
+
+  /// [reindexSearchParameter], calling [stillHeld] before each write when
+  /// a background run holds the store's lease
+  /// ([SearchParameterIndexing]): it throws when the run must stop.
+  Future<int> _reindexSearchParameter(
+    String code, {
+    Future<void> Function()? stillHeld,
+  }) async {
     while (true) {
-      final read = await _reindexOne(code);
+      final read = await _reindexOne(code, stillHeld);
       if (read != null) return read;
     }
   }
 
   /// One attempt; null when the definitions changed before the swap.
-  Future<int?> _reindexOne(String code) async {
+  Future<int?> _reindexOne(
+    String code,
+    Future<void> Function()? stillHeld,
+  ) async {
+    // Read before the registry: a change between the two makes the swap
+    // below build again, never keep rows of a registry already replaced.
+    final generation = await searchParameterGeneration();
     final custom = await customSearchParameters;
     final names = [code, '$code:of-type'];
     final pendingNames = [for (final n in names) '$_pending$n'];
@@ -1026,6 +1039,7 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
     }
 
     // Whatever an earlier build of this code left behind.
+    await stillHeld?.call();
     await deleteRows(readTypes, [...pendingNames, _readMark]);
 
     var count = 0;
@@ -1063,15 +1077,27 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
           );
         }
         count += stored.length;
+        await stillHeld?.call();
         await _insertLists(lists);
         await Future<void>.delayed(Duration.zero);
       }
     }
 
     return transaction(() async {
-      if (!identical(_customLoaded, custom)) {
-        // A definition was saved or deleted while this built: build again
-        // on what is registered now.
+      // A write first, so the transaction holds the store's write lock
+      // before it reads the count below: another connection cannot change
+      // a definition between that read and the swap.
+      if (stillHeld != null) {
+        await stillHeld();
+      } else {
+        await customStatement(
+          'UPDATE $_generationTable SET n = n WHERE id = 0',
+        );
+      }
+      if (!identical(_customLoaded, custom) ||
+          await searchParameterGeneration() != generation) {
+        // A definition was saved or deleted while this built, through this
+        // connection or another: build again on what is registered now.
         await deleteRows(readTypes, [...pendingNames, _readMark]);
         return null;
       }
@@ -1410,33 +1436,6 @@ class FhirDb<R extends FhirNode, T extends Object> extends _$FhirDb {
       'idx_special_value',
     ]) {
       await customStatement('DROP INDEX IF EXISTS $name');
-    }
-  }
-}
-
-/// A table a store creates the first time it needs it (`store_clock`,
-/// `search_parameter_generation`), so a subclass with its own migration
-/// needs no step for it. Created inside a caller's transaction that then
-/// rolls back, the table is gone though its creation completed: measured
-/// 2026-11-24 (fhir_r4_db `search_parameter_two_connections_test.dart`),
-/// a store whose first save was in a transaction that rolled back failed
-/// every later save on that connection with "no such table: store_clock".
-/// So a use that finds no table creates it again, once.
-class _CreatedOnFirstUse {
-  _CreatedOnFirstUse(this._create);
-
-  final Future<void> Function() _create;
-  Future<void>? _ready;
-
-  Future<T> use<T>(Future<T> Function() body) async {
-    await (_ready ??= _create());
-    try {
-      return await body();
-    } on Object catch (e) {
-      if (!'$e'.contains('no such table')) rethrow;
-      _ready = null;
-      await (_ready ??= _create());
-      return body();
     }
   }
 }

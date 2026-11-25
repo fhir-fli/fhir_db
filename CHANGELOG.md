@@ -1,5 +1,35 @@
 # fhir_db
 
+## [0.16.0]
+
+- **Breaking: the background re-index is recorded in the store, not in
+  each connection's memory.** `SearchParameterIndexing.running`,
+  `waiting` and `last` are gone; `status()` reads every code's row from
+  the store file (waiting, running, done or failed; when queued, when the
+  last run began and ended, resources read, or the error; and whether a
+  run was cut off). An app's background service and its screens each
+  open a connection to the file, and a screen could not see a re-index
+  the service ran; a run whose process ended was lost, with nothing to
+  start it again. The queue (`search_parameter_indexing`) and a lease
+  (`search_parameter_indexer`) are created on first use. One connection
+  holds the lease and runs the queue, renewing it every 30 s
+  (`heartbeat`); one not renewed within 2 min (`staleAfter`) is taken
+  over by the next connection that queues a code, first searches or
+  saves, or retries, and the run that lost it stops before its next
+  write. `idle` now waits for the whole store, not this connection.
+  `close()` stops this connection's run between pages and gives the
+  lease up, so the next connection resumes at once.
+- **`reindexSearchParameter` waits for a background run and holds the
+  lease while it builds.** Two builds of one code at once each deleted
+  the other's half-built rows: called while the background run of the
+  same code was building, it lost a record saved meanwhile, three runs in
+  three (measured 2026-11-25).
+- Now that any connection may run the queue, the check before a
+  re-index swaps its rows in also reads `searchParameterGeneration`
+  (after a write, so it holds the store's write lock), and builds again
+  when a definition changed through another connection meanwhile, rather
+  than swap in rows the queued re-run would replace.
+
 ## [0.15.8]
 
 - **A `SearchParameter` saved through one connection to a store file is
