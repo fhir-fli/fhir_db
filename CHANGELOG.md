@@ -1,5 +1,17 @@
 # fhir_db
 
+## [0.16.3]
+
+- **`waitForWriters(db, timeout:)`: a connection's wait for another
+  connection's write, timed by the clock.** Only one connection writes to
+  a file at a time; a second waits. `PRAGMA busy_timeout` adds up the
+  sleeps it asks for, and Dart's profiler cuts each sleep short, so with
+  the profiler on (`flutter test`, debug and profile builds) a 10 s
+  timeout gave up after 115 ms and the second write failed with
+  "database is locked"; with it off, 10,009 ms. `waitForWriters` waited
+  10,002 ms both ways (measured 2026-11-25, SQLite 3.53.4). Call it in
+  the connection's `setup` in place of the pragma.
+
 ## [0.16.2]
 
 - **A background re-index that finds the store locked by another

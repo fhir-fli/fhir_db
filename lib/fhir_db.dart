@@ -23,3 +23,4 @@ export 'src/search/search_parameter_indexing.dart';
 export 'src/search/search_parameter_types.dart';
 export 'src/search/search_query_key.dart';
 export 'src/tables/tables.dart';
+export 'src/wait_for_writers.dart';
