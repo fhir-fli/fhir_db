@@ -530,9 +530,15 @@ class SearchParameterIndexing {
   /// it waits for the commit. Guarded: an error nothing awaited would
   /// otherwise reach the root zone and end the process (measured
   /// 2026-11-23, fhir_db 0.15.7). Completes when [job] ends, either way.
+  ///
+  /// The completer is made under the root zone too. A completer made in
+  /// the caller's zone completes through that zone's microtask queue, and
+  /// a widget test's zone runs its queue only while the test pumps: there,
+  /// `close()` waited for this run forever (measured 2026-11-26, fhirant's
+  /// administration screen test, every fhir_db 0.16 release).
   Future<void> _detached(Future<void> Function() job) {
-    final done = Completer<void>();
-    Zone.root.run(() {
+    return Zone.root.run(() {
+      final done = Completer<void>();
       unawaited(
         runZonedGuarded(
           () async {
@@ -547,8 +553,8 @@ class SearchParameterIndexing {
           (error, stack) => _workerError = error,
         ),
       );
+      return done.future;
     });
-    return done.future;
   }
 }
 

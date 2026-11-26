@@ -1,5 +1,17 @@
 # fhir_db
 
+## [0.16.4]
+
+- **`close()` no longer waits forever when the background re-index was
+  started from a zone that holds its microtasks.** The run's end was
+  delivered through the queue of the zone that started it; a Flutter
+  widget test's zone runs that queue only while the test pumps, so a
+  store closed in a `tearDown` never closed (fhirant's administration
+  screen test: passed on 0.15.8, timed out on 0.16.0 to 0.16.3; passes
+  on this, 9 of 9). The run's end is now made under the root zone, as
+  the run itself already was. Test: `test/indexing_zone_test.dart`,
+  which times out on 0.16.3.
+
 ## [0.16.3]
 
 - **`waitForWriters(db, timeout:)`: a connection's wait for another
